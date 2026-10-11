@@ -1,0 +1,19 @@
+# Default Damage Score weights - all dimensions weighted equally.
+# Copy this file and adjust to model a different risk posture, then
+# pass it with --weights path/to/your_weights.yaml. Re-scoring with a
+# different weights file does NOT require re-running any checks -
+# that's the point of keeping weights separate from the findings.
+
+physical_safety: 1.0
+privacy: 1.0
+financial: 1.0
+availability: 1.0
+chaining_depth: 1.0
+
+# Example alternative (safety-focused household, e.g. elderly or
+# medically vulnerable occupant):
+# physical_safety: 2.5
+# privacy: 0.75
+# financial: 0.5
+# availability: 1.0
+# chaining_depth: 1.5

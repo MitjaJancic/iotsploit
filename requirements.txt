@@ -1,0 +1,7 @@
+pyyaml>=6.0
+requests>=2.31
+paho-mqtt>=1.6         # works with either the 1.x or 2.x callback API
+zeroconf>=0.131
+bleak>=0.21
+jinja2>=3.1
+pymodbus>=3.5

@@ -1,0 +1,30 @@
+device_id: shelly_trv
+vendor: Shelly
+model: TRV
+protocols: [http, mqtt]
+
+authorized: true   # your own lab hardware - this is what lets http check skip --authorized
+
+network:
+  http:
+    base_url: "http://{ip}"
+    state_changing_endpoints:
+      - path: "/rpc/TRV.SetTarget?id=0&target_C=30"
+        method: GET
+        expect_auth: true
+        description: "Set target temperature via RPC"
+
+  mqtt:
+    topic_prefix: "shellytrv"
+    expected_tls: true
+
+known_cves:
+  - id: "CVE-2023-42144"
+    description: "Wi-Fi password transmitted in cleartext during setup"
+    cvss: 7.5
+    damage_score:
+      physical_safety: 2
+      privacy: 1
+      financial: 0
+      availability: 0
+      chaining_depth: 0

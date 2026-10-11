@@ -1,0 +1,54 @@
+# _template.yaml
+# Copy this file, rename it (drop the leading underscore so the loader
+# picks it up), and fill in only the sections your device needs.
+# This is the ONLY place device-specific knowledge should live -
+# never add vendor-specific logic to core/ or checks/.
+
+device_id: my_device_id          # unique, used in finding IDs and report rows
+vendor: VendorName
+model: ModelName
+protocols: [http, mqtt, ble]      # any subset of: http, mqtt, ble, modbus
+
+authorized: false                  # set to true ONLY for hardware you own and are authorized
+                                    # to test. This is what lets `http check` actually send its
+                                    # state-changing request without passing --authorized every
+                                    # time - a deliberate, written, version-controlled decision
+                                    # per device, rather than a flag you type (and might forget
+                                    # the meaning of) on every command.
+
+network:
+  http:
+    base_url: "http://{ip}"       # {ip} is substituted at runtime via --device-ip
+    state_changing_endpoints:
+      - path: "/relay/0?turn=on"
+        method: GET
+        expect_auth: true          # true = this SHOULD require auth; check flags it if it doesn't
+        description: "Toggle relay 0 on"
+
+  mqtt:
+    topic_prefix: "device-XXXXXX"
+    expected_tls: true             # true = check_mqtt_tls flags a finding if plaintext connect succeeds
+
+  ble:
+    name_pattern: "DeviceNamePrefix"  # substring match against BLE advertisement names
+
+flagged_ports:                     # optional: ports worth a passive open/closed check,
+  - port: 1234                      # e.g. a documented backdoor or management port
+    reason: "Short reason this port matters for this device"
+    damage_score:
+      physical_safety: 0
+      privacy: 2
+      financial: 0
+      availability: 1
+      chaining_depth: 0
+
+known_cves:
+  - id: "CVE-YYYY-NNNNN"
+    description: "Short description of the known issue"
+    cvss: 7.5
+    damage_score:                  # 0-3 per dimension, your taxonomy from the project plan
+      physical_safety: 1
+      privacy: 0
+      financial: 0
+      availability: 1
+      chaining_depth: 0

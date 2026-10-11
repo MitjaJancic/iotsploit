@@ -1,0 +1,28 @@
+device_id: shelly_1pm_gen4
+vendor: Shelly
+model: 1PM Gen4
+protocols: [http, mqtt, ble]
+
+authorized: true   # your own lab hardware - this is what lets http check skip --authorized
+
+network:
+  http:
+    base_url: "http://{ip}"
+    state_changing_endpoints:
+      - path: "/rpc/Switch.Set?id=0&on=true"
+        method: GET
+        expect_auth: true
+        description: "Gen2+ RPC call to turn relay 0 on"
+
+  mqtt:
+    topic_prefix: "shelly1pm-gen4"
+    expected_tls: true
+
+  ble:
+    name_pattern: "ShellyPlus1PM"
+
+known_cves: []
+# Fill in with any Gen4-specific CVEs you find during your literature
+# review; leave empty if none are published yet, which is itself a
+# result worth noting (you may be contributing the first documented
+# finding for this generation).

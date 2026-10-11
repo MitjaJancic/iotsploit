@@ -1,0 +1,21 @@
+device_id: shelly_blu_dw
+vendor: Shelly
+model: BLU Door/Window
+protocols: [ble]
+
+authorized: true   # your own lab hardware - this is what lets http check skip --authorized
+
+network:
+  ble:
+    name_pattern: "SBDW"
+
+known_cves: []
+# This device has no HTTP/MQTT surface of its own - it speaks BLE to
+# an ESPHome proxy, which then republishes to MQTT. Your chaining
+# test (spoofing an open/close event toward the proxy, then watching
+# whether Home Assistant's automation reacts the same way it would to
+# a real event) is a scenario you design and run yourself, using
+# core.scoring.Finding and core.evidence.EvidenceStore to record
+# whatever you observe - that keeps the judgment calls about what's
+# safe to spoof on your own rig in your hands rather than baked into
+# a generic tool.

@@ -1,0 +1,148 @@
+# OWASP IoTGoat - https://github.com/OWASP/IoTGoat
+#
+# Deliberately insecure OpenWrt-based router firmware, built by OWASP
+# for exactly this kind of testing. Used here as a generalization
+# test: everything below is config, no new Python was needed to
+# point the tool at a completely different device class.
+#
+# Sourced from the official wiki (Getting-started, IoTGoat-challenges,
+# Challenge-solutions pages) - re-verify against the version you
+# actually run, since port numbers/paths can shift between releases.
+
+device_id: owasp_iotgoat
+vendor: OWASP
+model: IoTGoat (OpenWrt-based)
+protocols: [http, mqtt]
+
+authorized: true   # your own IoTGoat VM - lets http check skip --authorized
+
+# mqtt added after live testing found port 1883 open and accepting
+# anonymous CONNECTs - not mentioned in OWASP's own documentation, so
+# this looks like your own discovered finding rather than a
+# replication of a published one. Worth double-checking what's
+# actually listening there (it may be IoTGoat's own broker, or
+# something incidental to your specific VM/snapshot) before writing
+# it up as a device-level finding.
+
+network:
+  http:
+    base_url: "http://{ip}"
+    state_changing_endpoints:
+      - path: "/cgi-bin/luci/admin/iotgoat/cmdinject"
+        method: GET
+        expect_auth: true
+        description: >
+          Documented "secret developer diagnostics" page that runs
+          commands as root. The official challenge write-up confirms
+          this DOES require an authenticated LuCI session - so this
+          is a true-negative test case: check_http_auth should report
+          "correctly required authentication", not a vulnerability.
+          If a future IoTGoat release changes that, this check will
+          catch the regression.
+
+  mqtt:
+    topic_prefix: "unknown"       # not yet identified - enumerate topics once you confirm this is a real broker
+    expected_tls: false            # unknown/undocumented service; set true if you confirm TLS should be expected
+
+# Ports documented in the official port-scan walkthrough. 5515 is the
+# interesting one: a raw TCP backdoor with no HTTP/MQTT surface at
+# all, which only a plain port scan (not any HTTP/MQTT-specific
+# check) can catch - a good test that check_flagged_ports is pulling
+# weight the other checks can't.
+flagged_ports:
+  - port: 5515
+    reason: >
+      Documented persistent backdoor daemon (netcat to this port
+      returns "Successfully Connected to IoTGoat's Backdoor").
+    damage_score:
+      physical_safety: 0
+      privacy: 2
+      financial: 0
+      availability: 2
+      chaining_depth: 1
+  - port: 5000
+    reason: >
+      MiniUPnP management interface; documented as exploitable to
+      modify firewall rules from unauthorized devices on the network.
+    damage_score:
+      physical_safety: 0
+      privacy: 1
+      financial: 0
+      availability: 2
+      chaining_depth: 1
+
+# Findings from the published literature review / firmware analysis
+# rather than anything this tool checks live - this is the "your CVE
+# database lookup is config-driven too" half of check_known_cves.
+known_cves:
+  - id: "SELF-DISCOVERED-MQTT-ANON"
+    description: >
+      [Self-discovered, not from OWASP's documentation] Live testing
+      with `iotsploit mqtt anon-check` found a broker on port
+      1883 accepting fully anonymous CONNECTs. Confirm what's
+      actually running there (the IoTGoat router's own service vs.
+      something else on the VM/network) before citing this as a
+      device-level finding - but if confirmed, this is a genuinely
+      novel data point for your thesis rather than a replication.
+    cvss: null
+    damage_score:
+      physical_safety: 0
+      privacy: 2
+      financial: 1
+      availability: 1
+      chaining_depth: 1
+
+  - id: "IOTGOAT-HARDCODED-CREDS"
+    description: >
+      v1.0 release ships hardcoded user credentials compiled into the
+      firmware image (root and a secondary user account), crackable
+      via offline hash cracking or online brute force against common
+      IoT-malware wordlists (e.g. Mirai-derived lists).
+    cvss: 9.8
+    damage_score:
+      physical_safety: 1
+      privacy: 2
+      financial: 0
+      availability: 1
+      chaining_depth: 2
+
+  - id: "CVE-2020-7982"
+    description: "Insecure dnsmasq package update configuration."
+    cvss: null
+    damage_score:
+      physical_safety: 0
+      privacy: 0
+      financial: 0
+      availability: 1
+      chaining_depth: 0
+
+  - id: "IOTGOAT-XSS-FIREWALL-RULES"
+    description: >
+      Unsanitized input on the firewall traffic-rules, port-forwarding,
+      and wireless SSID admin pages allows stored XSS.
+    cvss: null
+    damage_score:
+      physical_safety: 0
+      privacy: 1
+      financial: 0
+      availability: 0
+      chaining_depth: 1
+
+# Also worth running against this target (profile-independent modules,
+# added from Practical IoT Hacking - see docs/USAGE.md):
+#   iotsploit upnp enum --upnp-location http://<ip>:5000/rootDesc.xml
+#   iotsploit upnp wan-check --upnp-location http://<ip>:5000/rootDesc.xml
+# IoTGoat's documented MiniUPnPd on port 5000 is exactly the kind of
+# target Chapter 6's UPnP section covers - confirm the actual
+# description-XML path with `curl http://<ip>:5000/` first, since
+# IoTGoat's build may not use the conventional /rootDesc.xml path.
+
+# NOT modeled here on purpose: command-injection exploitation of the
+# cmdinject page itself, brute-forcing the hardcoded credentials, and
+# interacting with the port-5515 backdoor beyond confirming it's
+# open. Those are the actual IoTGoat *challenges* - working through
+# them by hand (or with Hydra/Medusa/ncrack, per the official
+# walkthrough) is a good way to validate your damage-scoring rubric
+# against a known-answer case, but they're deliberate, scenario-
+# specific exploitation steps, not something to fold into a reusable
+# capability check that might get pointed at hardware you don't own.

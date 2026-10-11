@@ -1,0 +1,32 @@
+device_id: tapo_c100
+vendor: TP-Link
+model: Tapo C100
+protocols: [http]
+
+authorized: true   # your own lab hardware - this is what lets http check skip --authorized
+
+network:
+  http:
+    base_url: "http://{ip}"
+    state_changing_endpoints:
+      - path: "/stream1"
+        method: GET
+        expect_auth: true
+        description: "RTSP/ONVIF stream endpoint - confirm it is not reachable without credentials"
+
+# Also worth running against this target (profile-independent module,
+# added from Practical IoT Hacking ch.6's WS-Discovery section): ONVIF
+# cameras like this one answer WS-Discovery Probes, so
+#   iotsploit wsd scan
+# run on the same network segment should surface it - a good check
+# that nothing is leaking more device identity over WS-Discovery than
+# the HTTP surface already does.
+
+known_cves: []
+# The real "finding" for this device in your thesis is usually
+# behavioral (default-credential reuse, ONVIF auth bypass on a
+# specific firmware range) rather than a single documented CVE id.
+# Record whatever you find as a known_cves-style entry with an
+# ARCH- or FW-prefixed id (see shelly_plug_s.yaml for the pattern)
+# once you've confirmed it against your own unit and firmware
+# version.

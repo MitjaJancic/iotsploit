@@ -1,0 +1,35 @@
+device_id: shelly_plug_s_gen3
+vendor: Shelly
+model: Plug S Gen3
+protocols: [http, mqtt]
+
+authorized: true   # your own lab hardware - this is what lets http check skip --authorized
+
+network:
+  http:
+    base_url: "http://{ip}"
+    state_changing_endpoints:
+      - path: "/rpc/Switch.Set?id=0&on=true"
+        method: GET
+        expect_auth: true
+        description: "Toggle plug relay via RPC"
+
+  mqtt:
+    topic_prefix: "shellyplugs-gen3"
+    expected_tls: false
+    # This device does not support MQTT TLS at all - set expected_tls
+    # to false here, not because it's "fine", but because the
+    # architectural-weakness finding belongs in known_cves below
+    # rather than being flagged by check_mqtt_tls (which is designed
+    # to catch devices that SHOULD be using TLS but aren't).
+
+known_cves:
+  - id: "ARCH-MQTT-CLEARTEXT"
+    description: "Device firmware does not support MQTT-over-TLS at all (architectural limitation, not a patchable bug)"
+    cvss: null
+    damage_score:
+      physical_safety: 0
+      privacy: 1
+      financial: 1
+      availability: 0
+      chaining_depth: 0
