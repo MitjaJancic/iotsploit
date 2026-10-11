@@ -237,6 +237,134 @@ def check_flagged_ports(profile: DeviceProfile, ip: str, evidence_store=None) ->
     return findings
 
 
+def check_http_injection(profile: DeviceProfile, ip: str, allow_state_changes: bool = False,
+                          delay_seconds: int = 4, evidence_store=None) -> list[Finding]:
+    """
+    Time-based blind command-injection detection against each
+    endpoint's declared injectable_params. For each param, sends a
+    handful of shell-metacharacter + `sleep N` payloads and compares
+    response latency to an unmodified baseline request. A response
+    that takes ~N seconds longer than baseline indicates the payload
+    executed server-side, without ever needing to see command output.
+
+    This is the same technique legitimate DAST scanners (Burp,
+    Nuclei's command-injection templates, etc.) use, deliberately kept
+    to the non-destructive half: the payload's only effect, if it
+    executes, is a delay - no data read, no state changed, no shell
+    retained. Gated behind authorization like check_http_auth, since
+    it still sends real requests to a live device's state-changing
+    surface.
+
+    Requires injectable_params to be filled in on the profile first -
+    this check does not guess parameter names, see
+    core/device_profile.py's HttpEndpoint docstring.
+    """
+    import time
+
+    findings = []
+    if not profile.supports("http") or not profile.http_base_url:
+        return findings
+
+    payload_templates = [
+        "; sleep {n} #",
+        "| sleep {n}",
+        "`sleep {n}`",
+        "$(sleep {n})",
+        "&& sleep {n}",
+    ]
+
+    for endpoint in profile.http_endpoints:
+        if not endpoint.injectable_params:
+            continue
+
+        if not allow_state_changes:
+            findings.append(Finding(
+                finding_id=_new_finding_id("http_injection_skipped", profile.device_id),
+                device_id=profile.device_id,
+                check_name="http_injection",
+                description=(
+                    f"Skipped (not authorized): {endpoint.method} {endpoint.path}, "
+                    f"params={endpoint.injectable_params}"
+                ),
+                cvss=None, damage={},
+            ))
+            continue
+
+        base_url = profile.http_base_url.format(ip=ip) + endpoint.path
+
+        # Baseline timing, no payload.
+        try:
+            t0 = time.monotonic()
+            requests.request(endpoint.method, base_url, timeout=delay_seconds + 5)
+            baseline = time.monotonic() - t0
+        except requests.RequestException as exc:
+            findings.append(Finding(
+                finding_id=_new_finding_id("http_injection", profile.device_id),
+                device_id=profile.device_id,
+                check_name="http_injection",
+                description=f"Baseline request to {base_url} failed: {exc}",
+                cvss=None, damage={},
+            ))
+            continue
+
+        for param in endpoint.injectable_params:
+            injected = False
+            for template in payload_templates:
+                payload_value = template.format(n=delay_seconds)
+                sep = "&" if "?" in endpoint.path else "?"
+                url = base_url + sep + endpoint.param_template.format(
+                    param_name=param, value=requests.utils.quote(payload_value))
+
+                evidence_path = None
+                try:
+                    t0 = time.monotonic()
+                    resp = requests.request(endpoint.method, url, timeout=delay_seconds + 5)
+                    elapsed = time.monotonic() - t0
+                except requests.RequestException as exc:
+                    continue
+
+                if evidence_store:
+                    evidence_path = evidence_store.save_text(
+                        _new_finding_id("http_injection", profile.device_id), "timing",
+                        f"url={url}\nbaseline={baseline:.2f}s elapsed={elapsed:.2f}s "
+                        f"threshold={baseline + delay_seconds * 0.8:.2f}s",
+                    )
+
+                if elapsed >= baseline + delay_seconds * 0.8:
+                    findings.append(Finding(
+                        finding_id=_new_finding_id("http_injection", profile.device_id),
+                        device_id=profile.device_id,
+                        check_name="http_injection",
+                        description=(
+                            f"Likely command injection: param '{param}' on {endpoint.method} "
+                            f"{endpoint.path} - response took {elapsed:.1f}s vs {baseline:.1f}s "
+                            f"baseline after payload `{payload_value}` (time-based blind detection, "
+                            f"no command output observed)."
+                        ),
+                        cvss=9.8,
+                        damage={"physical_safety": 1, "privacy": 2, "financial": 1,
+                                "availability": 2, "chaining_depth": 2},
+                        evidence_path=evidence_path,
+                    ))
+                    injected = True
+                    break  # one confirmed payload per param is enough
+
+            if not injected:
+                findings.append(Finding(
+                    finding_id=_new_finding_id("http_injection", profile.device_id),
+                    device_id=profile.device_id,
+                    check_name="http_injection",
+                    description=(
+                        f"No timing anomaly for param '{param}' on {endpoint.method} {endpoint.path} "
+                        f"across {len(payload_templates)} payloads - no injection detected "
+                        f"(or the backend doesn't use a shell for this param)."
+                    ),
+                    cvss=None, damage={},
+                ))
+
+    return findings
+
+
 def check_known_cves(profile: DeviceProfile, firmware_version: str | None = None) -> list[Finding]:
     """
     Surfaces the profile's documented known_cves as findings, so a

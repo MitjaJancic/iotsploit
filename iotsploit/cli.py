@@ -43,6 +43,7 @@ from iotsploit.core.scoring import load_weights, Finding
 from iotsploit.core.report import write_reports
 from iotsploit.checks.capability_checks import (
     check_http_auth,
+    check_http_injection,
     check_mqtt_tls,
     check_ble_advertising,
     check_known_cves,
@@ -62,6 +63,7 @@ from iotsploit.checks.firmware_checks import check_firmware_credentials
 MODULES = {
     "http": {
         "check": "Probe state-changing HTTP endpoints for missing authentication. (needs authorization)",
+        "injection-check": "Time-based blind command-injection probe of injectable_params. (needs authorization)",
     },
     "mqtt": {
         "test": "Check whether a broker expected to use TLS still accepts plaintext.",
@@ -292,6 +294,21 @@ def _run_action(args) -> list[Finding]:
                                          evidence_store=evidence)
         return findings
 
+    if args.module == "http" and args.action == "injection-check":
+        _require_target(args)
+        for p in profiles:
+            if not p.supports("http"):
+                _note(args, f"{p.device_id} does not declare http, skipping")
+                continue
+            if not any(e.injectable_params for e in p.http_endpoints):
+                _note(args, f"{p.device_id} has no endpoints with injectable_params set, skipping")
+                continue
+            if not _is_authorized(args, p):
+                _note(args, f"{p.device_id} not authorized - injection probes will be skipped")
+            findings += check_http_injection(p, args.target, allow_state_changes=_is_authorized(args, p),
+                                              evidence_store=evidence)
+        return findings
+
     if args.module == "mqtt" and args.action == "test":
         _require_target(args)
         for p in profiles:
@@ -330,6 +347,9 @@ def _run_action(args) -> list[Finding]:
                     _note(args, f"{p.device_id} not authorized - http check will skip its state-changing request")
                 findings += check_http_auth(p, args.target, allow_state_changes=_is_authorized(args, p),
                                              evidence_store=evidence)
+                if any(e.injectable_params for e in p.http_endpoints):
+                    findings += check_http_injection(p, args.target, allow_state_changes=_is_authorized(args, p),
+                                                      evidence_store=evidence)
             if p.supports("mqtt"):
                 findings += check_mqtt_tls(p, args.target, args.port or 1883, evidence_store=evidence)
                 findings += check_mqtt_anonymous(args.target, args.port or 1883, device_id=p.device_id,

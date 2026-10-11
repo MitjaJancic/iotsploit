@@ -24,6 +24,11 @@ network:
         method: GET
         expect_auth: true          # true = this SHOULD require auth; check flags it if it doesn't
         description: "Toggle relay 0 on"
+        injectable_params: []      # param names that take user input and might reach a shell
+                                    # unsafely (e.g. a diagnostics page's "host" field). Leave
+                                    # empty unless you've verified the real param name yourself -
+                                    # don't guess. Fill in to enable:
+                                    #   iotsploit http injection-check <ip> --device-id <this_device>
 
   mqtt:
     topic_prefix: "device-XXXXXX"

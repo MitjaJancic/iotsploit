@@ -21,6 +21,14 @@ class HttpEndpoint:
     method: str = "GET"
     expect_auth: bool = True
     description: str = ""
+    # Query/form param names that take user input and might reach a
+    # shell unsafely (e.g. a diagnostics page's "host" field passed
+    # into ping). Left empty by default - fill in once YOU have
+    # identified the real param name via source/firmware analysis or
+    # by inspecting the page, not guessed. See check_http_injection.
+    injectable_params: list[str] = field(default_factory=list)
+    # {param_name}} is substituted with each candidate payload in turn.
+    param_template: str = "{param_name}={value}"
 
 
 @dataclass
@@ -69,6 +77,7 @@ def _parse_http(raw: dict) -> tuple[str | None, list[HttpEndpoint]]:
             method=e.get("method", "GET"),
             expect_auth=e.get("expect_auth", True),
             description=e.get("description", ""),
+            injectable_params=e.get("injectable_params", []),
         )
         for e in http_cfg.get("state_changing_endpoints", [])
     ]

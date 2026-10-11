@@ -39,6 +39,15 @@ network:
           "correctly required authentication", not a vulnerability.
           If a future IoTGoat release changes that, this check will
           catch the regression.
+        # injectable_params deliberately left empty: I don't have a
+        # verified parameter name for this page from the official
+        # docs. Once you have a valid authenticated session (via the
+        # hardcoded-credentials challenge) and can view the actual
+        # page/source to find the real field name (something like
+        # "cmd" or "host" is a guess, not a confirmed fact), fill it
+        # in here, e.g. injectable_params: ["host"], then:
+        #   iotsploit http injection-check <ip> --device-id owasp_iotgoat
+        injectable_params: []
 
   mqtt:
     topic_prefix: "unknown"       # not yet identified - enumerate topics once you confirm this is a real broker
