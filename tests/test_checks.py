@@ -119,6 +119,25 @@ class TestFirmwareAudit(unittest.TestCase):
             self.assertTrue(wifi_service["masked_value"].startswith("Supe"))
             self.assertTrue("*" in wifi_service["masked_value"])
 
+    def test_write_reports_markdown(self):
+        from iotsploit.core.report import write_reports
+        from iotsploit.core.scoring import DEFAULT_WEIGHTS
+        test_finding = Finding(
+            finding_id="test_find_1",
+            device_id="test_device",
+            check_name="firmware_shadow",
+            description="Account 'root' has a crackable DES hash in /etc/shadow",
+            cvss=9.8,
+            damage={"privacy": 2, "chaining_depth": 1},
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            paths = write_reports([test_finding], DEFAULT_WEIGHTS, tmpdir)
+            self.assertTrue(Path(paths["md"]).exists())
+            content = Path(paths["md"]).read_text(encoding="utf-8")
+            self.assertIn("# IoT Security & Damage Assessment Report", content)
+            self.assertIn("Account 'root' has a crackable DES hash", content)
+            self.assertIn("CRITICAL", content)
+
 
 if __name__ == "__main__":
     unittest.main()

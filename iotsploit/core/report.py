@@ -58,13 +58,72 @@ def _severity_class(score: float) -> str:
     return "low"
 
 
+def generate_markdown_report(findings: list[Finding], weights: dict, generated_at: str) -> str:
+    summary = aggregate(findings, weights)
+    lines = [
+        "# IoT Security & Damage Assessment Report",
+        f"**Generated:** {generated_at}  ",
+        f"**Total Findings:** {len(findings)}  ",
+        "",
+        "## 1. Device Summary",
+        "| Device ID | Findings Count | Total Damage Score | Max Damage Score | Max CVSS |",
+        "| :--- | :---: | :---: | :---: | :---: |",
+    ]
+    if summary:
+        for dev, s in summary.items():
+            lines.append(
+                f"| `{dev}` | {s['finding_count']} | {s['total_damage_score']:.1f} | {s['max_damage_score']:.1f} | {s['max_cvss']:.1f} |"
+            )
+    else:
+        lines.append("| *None* | 0 | 0.0 | 0.0 | 0.0 |")
+
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## 2. Detailed Findings",
+        "",
+    ])
+
+    if not findings:
+        lines.append("*No security findings detected.*")
+    else:
+        for i, f in enumerate(findings, start=1):
+            score = f.damage_score(weights)
+            severity = "HIGH" if score >= 6 else ("MEDIUM" if score >= 3 else "LOW")
+            if f.cvss and f.cvss >= 9.0:
+                severity = "CRITICAL"
+
+            lines.extend([
+                f"### {i}. [{severity}] `{f.check_name}` (Device: `{f.device_id}`)",
+                f"- **Finding ID:** `{f.finding_id}`",
+                f"- **CVSS Base Score:** {f.cvss if f.cvss is not None else 'N/A'}",
+                f"- **Calculated Damage Score:** {score:.1f}",
+            ])
+
+            if f.damage:
+                damage_items = ", ".join(f"{k}: {v}" for k, v in f.damage.items())
+                lines.append(f"- **Damage Dimensions:** {damage_items}")
+
+            if f.evidence_path:
+                lines.append(f"- **Evidence File:** `{f.evidence_path}`")
+
+            lines.extend([
+                "- **Full Description:**",
+                f"  > {f.description.strip()}",
+                "",
+            ])
+
+    return "\n".join(lines) + "\n"
+
+
 def write_reports(findings: list[Finding], weights: dict, output_dir: str | Path,
                    basename: str = "report") -> dict:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     summary = aggregate(findings, weights)
-    generated_at = datetime.now(timezone.utc).isoformat()
+    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     json_payload = {
         "generated_at": generated_at,
@@ -73,7 +132,7 @@ def write_reports(findings: list[Finding], weights: dict, output_dir: str | Path
         "findings": [f.to_dict(weights) for f in findings],
     }
     json_path = output_dir / f"{basename}.json"
-    json_path.write_text(json.dumps(json_payload, indent=2, default=str))
+    json_path.write_text(json.dumps(json_payload, indent=2, default=str), encoding="utf-8")
 
     device_rows = "\n".join(
         f"<tr><td>{dev}</td><td>{s['finding_count']}</td>"
@@ -97,7 +156,12 @@ def write_reports(findings: list[Finding], weights: dict, output_dir: str | Path
             generated_at=generated_at,
             device_rows=device_rows or "<tr><td colspan='5'>No devices scanned</td></tr>",
             finding_rows=finding_rows or "<tr><td colspan='7'>No findings</td></tr>",
-        )
+        ),
+        encoding="utf-8"
     )
 
-    return {"json": str(json_path), "html": str(html_path)}
+    md_path = output_dir / f"{basename}.md"
+    md_content = generate_markdown_report(findings, weights, generated_at)
+    md_path.write_text(md_content, encoding="utf-8")
+
+    return {"json": str(json_path), "html": str(html_path), "md": str(md_path)}

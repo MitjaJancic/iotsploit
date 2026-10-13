@@ -493,10 +493,14 @@ def main():
     if args.module != "profiles":
         _print_findings(findings, weights, args.json)
 
-    if args.output:
-        paths = write_reports(findings, weights, args.output)
-        print(f"\nJSON report: {paths['json']}")
-        print(f"HTML report: {paths['html']}")
+    if args.module != "profiles" and findings:
+        from pathlib import Path
+        out_dir = Path(args.output) if args.output else Path(".")
+        paths = write_reports(findings, weights, out_dir)
+        print(f"\n[+] Saved human-readable report: {paths['md']}")
+        if args.output:
+            print(f"[+] Saved HTML report: {paths['html']}")
+            print(f"[+] Saved JSON report: {paths['json']}")
 
 
 if __name__ == "__main__":
