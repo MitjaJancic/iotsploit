@@ -48,6 +48,7 @@ Metasploit-style: `iotsploit <module> <action> [target] [options]`
 | `wsd` | `scan` | no | WS-Discovery Probe for ONVIF-style devices — ch.6 |
 | `modbus` | `check` | yes (IP) | unauthenticated read-only holding-register probe |
 | `firmware` | `scan` | yes (filesystem path) | static passwd/shadow/hardcoded-credential scan — ch.9 |
+| `coap` | `check` | yes (IP) | read-only CoAP GET missing-auth probe (GET only, never PUT/POST) |
 
 The last six are **profile-independent** — `--device-id` only labels the finding, it's never looked up against `--profiles-dir`, so these work against any target with zero profiles configured. See "Checks from *Practical IoT Hacking*" below for what each is actually testing and why it stops where it does.
 
@@ -78,6 +79,8 @@ This exists because `http check` doesn't know in advance whether the IP you type
 - **`cve list` → `check_known_cves`** — surfaces whatever CVEs/architectural issues you've documented in a profile's `known_cves` list as findings, so your literature-review findings and your live-test findings end up in the same report format.
 - **`audit run`** — all of the above for the matched profile(s) in one command; this is the closest equivalent to the old (pre-rewrite) default behavior.
 - **`http injection-check` → `check_http_injection`** — time-based blind command-injection detection. For each `injectable_params` entry on a profile's HTTP endpoints, sends a handful of `sleep N`-style payloads and compares response latency to an unmodified baseline. A response that takes ~N seconds longer indicates the payload executed server-side — no command output is ever read, so this stays non-destructive by the same definition as the rest of the tool, but it's still gated by authorization like `http check` since it sends real requests to a live state-changing surface. Requires `injectable_params` to actually be filled in on the profile first — the check never guesses parameter names itself (see `core/device_profile.py`'s `HttpEndpoint` docstring for why).
+
+- **`coap check` → `check_coap_auth`** — same missing-authentication pattern as `http check`, applied to CoAP (the protocol several real smart-home devices, e.g. Philips Hue bridges, speak instead of HTTP). Deliberately **GET-only**: it never sends PUT/POST, even when authorized, since confirming a resource is readable without credentials is already a citable finding on its own, with no need to actually change device state to prove it.
 
 **Why MQTT/Modbus injection isn't automated the same way:** HTTP and UPnP give you a request/response round trip to time. MQTT pub/sub doesn't reliably give you one back, and you don't know if *anything* is subscribed to a given topic without firmware analysis first (see `docs/research-log.md`'s section 5–6). Automatically spraying topics with injection payloads isn't detection, it's guessing — stays a manual, deliberate test once you've confirmed a real consumer via `firmware scan` or source analysis, same reasoning as not automating MQTT credential brute-forcing.
 

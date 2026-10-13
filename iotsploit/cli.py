@@ -57,6 +57,7 @@ from iotsploit.checks.book_checks import (
     check_modbus_unauth_read,
 )
 from iotsploit.checks.firmware_checks import check_firmware_credentials
+from iotsploit.checks.coap_checks import check_coap_auth
 
 # module -> {action: one-line help}, purely for --help / listing.
 # The actual behaviour for each lives in _run_action() below.
@@ -78,6 +79,9 @@ MODULES = {
     },
     "modbus": {
         "check": "Unauthenticated read-only Modbus holding-register probe.",
+    },
+    "coap": {
+        "check": "Read-only CoAP GET missing-authentication probe (GET only, never PUT/POST).",
     },
     "firmware": {
         "scan": "Static credential scan of an already-extracted firmware filesystem (ch.9).",
@@ -307,6 +311,15 @@ def _run_action(args) -> list[Finding]:
                 _note(args, f"{p.device_id} not authorized - injection probes will be skipped")
             findings += check_http_injection(p, args.target, allow_state_changes=_is_authorized(args, p),
                                               evidence_store=evidence)
+        return findings
+
+    if args.module == "coap" and args.action == "check":
+        _require_target(args)
+        for p in profiles:
+            if not p.coap_endpoints:
+                _note(args, f"{p.device_id} has no coap endpoints declared, skipping")
+                continue
+            findings += check_coap_auth(p, args.target, port=args.port or 5683, evidence_store=evidence)
         return findings
 
     if args.module == "mqtt" and args.action == "test":

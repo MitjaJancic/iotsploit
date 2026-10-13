@@ -44,6 +44,14 @@ _HARDCODED_PATTERNS = [
     re.compile(r"(?i)\b(root|admin)_?(password|pwd)\s*[=:]\s*['\"]?[^'\"\s]{2,}"),
     re.compile(r"(?i)backdoor"),
     re.compile(r"(?i)\btelnetd\b.*-l\s*/bin/(sh|login)"),  # telnetd dropping straight to a shell
+    # Broader secret types - same "grep for a shape, let a human confirm"
+    # approach as the credential patterns above, just covering the other
+    # kinds of hardcoded secrets firmware tends to ship.
+    re.compile(r"AKIA[0-9A-Z]{16}"),                        # AWS access key ID
+    re.compile(r"(?i)aws_secret_access_key\s*[=:]\s*['\"]?[A-Za-z0-9/+=]{20,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),  # JWT shape
+    re.compile(r"-----BEGIN (RSA|EC|OPENSSH|DSA|PGP) PRIVATE KEY-----"),
+    re.compile(r"(?i)\b(api[_-]?key|secret[_-]?key|access[_-]?token)\s*[=:]\s*['\"][A-Za-z0-9_\-]{12,}['\"]"),
 ]
 
 # Files/dirs that are expensive or pointless to text-scan.

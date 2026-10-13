@@ -59,6 +59,7 @@ class DeviceProfile:
     ble_name_pattern: str | None
     known_cves: list[KnownCve]
     flagged_ports: list[FlaggedPort]
+    coap_endpoints: list[HttpEndpoint]
     authorized: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -112,6 +113,21 @@ def _parse_cves(raw: dict) -> list[KnownCve]:
     return out
 
 
+def _parse_coap(raw: dict) -> list[HttpEndpoint]:
+    coap_cfg = raw.get("network", {}).get("coap")
+    if not coap_cfg:
+        return []
+    return [
+        HttpEndpoint(
+            path=e["path"],
+            method=e.get("method", "GET"),
+            expect_auth=e.get("expect_auth", True),
+            description=e.get("description", ""),
+        )
+        for e in coap_cfg.get("endpoints", [])
+    ]
+
+
 def _parse_flagged_ports(raw: dict) -> list[FlaggedPort]:
     out = []
     for p in raw.get("flagged_ports", []):
@@ -140,6 +156,7 @@ def load_profile(path: str | Path) -> DeviceProfile:
         ble_name_pattern=ble_pattern,
         known_cves=_parse_cves(raw),
         flagged_ports=_parse_flagged_ports(raw),
+        coap_endpoints=_parse_coap(raw),
         authorized=bool(raw.get("authorized", False)),
         raw=raw,
     )

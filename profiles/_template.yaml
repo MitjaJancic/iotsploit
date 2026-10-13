@@ -34,6 +34,13 @@ network:
     topic_prefix: "device-XXXXXX"
     expected_tls: true             # true = check_mqtt_tls flags a finding if plaintext connect succeeds
 
+  coap:
+    endpoints:
+      - path: "/state"
+        method: GET
+        expect_auth: true          # GET-only check - never sends PUT/POST, see coap_checks.py
+        description: "Device state resource"
+
   ble:
     name_pattern: "DeviceNamePrefix"  # substring match against BLE advertisement names
 
