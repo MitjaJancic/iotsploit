@@ -81,7 +81,26 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
         "",
         "---",
         "",
-        "## 2. Detailed Findings",
+        "## 2. Findings Index",
+        "| # | Check | Summary | Damage Score | CVSS |",
+        "| :---: | :--- | :--- | :---: | :---: |",
+    ])
+
+    if not findings:
+        lines.append("| - | *None* | No findings detected | 0.0 | - |")
+    else:
+        for idx, f in enumerate(findings, start=1):
+            short_desc = f.description.strip().replace("\n", " ")
+            if len(short_desc) > 75:
+                short_desc = short_desc[:72] + "…"
+            cvss_str = str(f.cvss) if f.cvss is not None else "-"
+            lines.append(f"| {idx} | `{f.check_name}` | {short_desc} | {f.damage_score(weights):.1f} | {cvss_str} |")
+
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## 3. Detailed Findings",
         "",
     ])
 

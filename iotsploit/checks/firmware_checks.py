@@ -128,25 +128,26 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
     passwd_matches = list(firmware_root.rglob("passwd")) + list(firmware_root.rglob("etc/passwd"))
     passwd_files = [p for p in set(passwd_matches) if p.is_file()]
     for passwd_path in passwd_files:
+        rel_p = passwd_path.relative_to(firmware_root)
         try:
             users = _parse_passwd(passwd_path)
         except Exception as exc:
             findings.append(Finding(
                 finding_id=_fid("firmware_passwd", device_id), device_id=device_id,
-                check_name="firmware_passwd", description=f"Could not parse {passwd_path}: {exc}",
+                check_name="firmware_passwd", description=f"Could not parse {rel_p}: {exc}",
                 cvss=None, damage={},
             ))
             continue
 
         uid0_extra = [u for u in users if u["uid"] == "0" and u["username"] != "root"]
         description = (
-            f"{passwd_path}: {len(users)} account(s): " + ", ".join(u["username"] for u in users)
+            f"{rel_p}: {len(users)} account(s): " + ", ".join(u["username"] for u in users)
         )
         damage = {}
         if uid0_extra:
             description += (
                 f". WARNING: non-root account(s) with UID 0 (root-equivalent): "
-                f"{', '.join(u['username'] for u in uid0_extra)} - classic hidden-backdoor pattern."
+                f"{', '.join(u['username'] for u in uid0_extra)} - hidden backdoor pattern."
             )
             damage = {"privacy": 2, "availability": 1, "chaining_depth": 1}
 
@@ -165,12 +166,13 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
     shadow_matches = list(firmware_root.rglob("shadow")) + list(firmware_root.rglob("etc/shadow"))
     shadow_files = [p for p in set(shadow_matches) if p.is_file()]
     for shadow_path in shadow_files:
+        rel_s = shadow_path.relative_to(firmware_root)
         try:
             entries = _parse_shadow(shadow_path)
         except Exception as exc:
             findings.append(Finding(
                 finding_id=_fid("firmware_shadow", device_id), device_id=device_id,
-                check_name="firmware_shadow", description=f"Could not parse {shadow_path}: {exc}",
+                check_name="firmware_shadow", description=f"Could not parse {rel_s}: {exc}",
                 cvss=None, damage={},
             ))
             continue
@@ -183,8 +185,8 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
                 finding_id=_fid("firmware_shadow_nopw", device_id), device_id=device_id,
                 check_name="firmware_shadow",
                 description=(
-                    f"{shadow_path}: account(s) with NO password at all (empty hash field): "
-                    f"{', '.join(e['username'] for e in no_password)} - logs in with any/no password."
+                    f"{rel_s}: account(s) with NO password (empty hash): "
+                    f"{', '.join(e['username'] for e in no_password)} - logs in with any password."
                 ),
                 cvss=9.8,
                 damage={"physical_safety": 1, "privacy": 2, "financial": 1, "availability": 1, "chaining_depth": 2},
@@ -195,9 +197,8 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
                 finding_id=_fid("firmware_shadow_hash", device_id), device_id=device_id,
                 check_name="firmware_shadow",
                 description=(
-                    f"{shadow_path}: account '{e['username']}' has a {e['hash_type']} hash - "
-                    f"crackable offline with john/hashcat against a wordlist of your choosing; "
-                    f"this tool deliberately stops at identifying it, not cracking it."
+                    f"{rel_s}: account '{e['username']}' has a {e['hash_type']} hash "
+                    f"(crackable offline with john/hashcat)."
                 ),
                 cvss=None,
                 damage={"privacy": 1, "chaining_depth": 1},

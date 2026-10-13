@@ -215,17 +215,17 @@ def _print_findings(findings: list[Finding], weights: dict, as_json: bool):
         print("No findings.")
         return
 
-    widths = (10, 24, 60, 7)
-    header = f"{'DEVICE':<{widths[0]}} {'CHECK':<{widths[1]}} {'DESCRIPTION':<{widths[2]}} {'SCORE':<{widths[3]}}"
+    # Simple index-based column output
+    header = f"{'#':<3} {'CHECK':<26} {'FINDING SUMMARY':<60} {'SCORE':<5}"
     print(header)
     print("-" * len(header))
-    for f in findings:
+    for idx, f in enumerate(findings, start=1):
         desc = f.description.strip().replace("\n", " ")
-        if len(desc) > widths[2]:
-            desc = desc[: widths[2] - 1] + "…"
-        print(f"{f.device_id:<{widths[0]}} {f.check_name:<{widths[1]}} {desc:<{widths[2]}} "
-              f"{f.damage_score(weights):<{widths[3]}.1f}")
-    print(f"\n{len(findings)} finding(s).")
+        if len(desc) > 60:
+            desc = desc[:57] + "…"
+        print(f"{idx:<3} {f.check_name:<26} {desc:<60} {f.damage_score(weights):<5.1f}")
+    print("-" * len(header))
+    print(f"Total: {len(findings)} finding(s)")
 
 
 def _require_target(args, what: str = "a target IP/hostname"):
