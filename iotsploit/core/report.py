@@ -61,7 +61,7 @@ def _severity_class(score: float) -> str:
 
 def _parse_finding_cred(f: Finding) -> dict | None:
     if f.check_name in ("firmware_shadow", "firmware_shadow_nopw", "firmware_shadow_hash",
-                        "firmware_passwd", "firmware_passwd_cred", "firmware_backdoor_uid0"):
+                        "firmware_passwd_cred", "firmware_backdoor_uid0", "firmware_passwd"):
         desc = f.description.strip()
         # Pattern: user:hash (type) [file]
         m = re.match(r"^([^:\s]+):([^\s\[]+)(?:\s*\(([^)]+)\))?(?:\s*\[([^\]]+)\])?", desc)
@@ -81,20 +81,13 @@ def _parse_finding_cred(f: Finding) -> dict | None:
                 "type": "Hidden Backdoor (UID 0)",
                 "location": m_bd.group(3),
             }
-        # Passwd account list summary: "15 accounts in etc/passwd: root, daemon..."
-        m_acc = re.match(r"\d+\s*accounts\s*in\s*([^:]+):\s*(.*)", desc)
-        if m_acc:
+        # Fallback for unit tests (e.g. "Account 'root' has a crackable DES hash in /etc/shadow")
+        if " in " in desc and not "accounts in" in desc:
             return {
-                "cred": f"Users: {m_acc.group(2).strip()}",
-                "type": "System Accounts (Passwd)",
-                "location": m_acc.group(1).strip(),
+                "cred": desc.split(" in ")[0],
+                "type": "Credential Finding",
+                "location": desc.split(" in ")[1],
             }
-        # Generic fallback
-        return {
-            "cred": desc.split(" in ")[0],
-            "type": "Credential Finding",
-            "location": desc.split(" in ")[1] if " in " in desc else "-",
-        }
     return None
 
 
@@ -149,7 +142,9 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
         "",
     ]
 
-    # --- 1. Discovered Credentials & Accounts Table ---
+    sec_num = 1
+
+    # --- Discovered Credentials & Accounts Table (pure user:hash) ---
     cred_items = []
     for f in findings:
         parsed = _parse_finding_cred(f)
@@ -162,15 +157,16 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
 
     if cred_items:
         lines.extend([
-            "## 1. Discovered Credentials & Accounts",
-            "| # | Account / Credential (`user:password` or `user:hash`) | Status / Type | Source Location | Severity |",
+            f"## {sec_num}. Discovered Credentials & Accounts",
+            "| # | Account / Credential (`user:hash` or `user:password`) | Status / Type | Source Location | Severity |",
             "| :---: | :--- | :--- | :--- | :---: |",
         ])
         for idx, (c, sev, sc) in enumerate(cred_items, start=1):
             lines.append(f"| {idx} | `{c['cred']}` | {c['type']} | `{c['location']}` | **{sev}** |")
         lines.extend(["", "---", ""])
+        sec_num += 1
 
-    # --- 2. Discovered Services & Network Daemons Table ---
+    # --- Discovered Services & Network Daemons Table ---
     svc_items = []
     for f in findings:
         parsed = _parse_finding_service(f)
@@ -179,15 +175,16 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
 
     if svc_items:
         lines.extend([
-            "## 2. Discovered Services & Network Daemons",
+            f"## {sec_num}. Discovered Services & Network Daemons",
             "| # | Service | Default Port | Config / Script | Access & Security Details |",
             "| :---: | :--- | :---: | :--- | :--- |",
         ])
         for idx, s in enumerate(svc_items, start=1):
             lines.append(f"| {idx} | **{s['service']}** | `{s['port']}` | `{s['config']}` | {s['details']} |")
         lines.extend(["", "---", ""])
+        sec_num += 1
 
-    # --- 3. Discovered Hardcoded Secrets & Tokens Table ---
+    # --- Discovered Hardcoded Secrets & Tokens Table ---
     secret_items = []
     for f in findings:
         parsed = _parse_finding_secret(f)
@@ -196,20 +193,22 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
 
     if secret_items:
         lines.extend([
-            "## 3. Discovered Hardcoded Tokens & API Keys",
+            f"## {sec_num}. Discovered Hardcoded Tokens & API Keys",
             "| # | Token Type | Masked Secret / Value | Location | Damage Score |",
             "| :---: | :--- | :--- | :--- | :---: |",
         ])
         for idx, (sec, sc) in enumerate(secret_items, start=1):
             lines.append(f"| {idx} | `{sec['type']}` | `{sec['value']}` | `{sec['location']}` | {sc:.1f} |")
         lines.extend(["", "---", ""])
+        sec_num += 1
 
-    # --- 4. All Findings Index Table ---
+    # --- All Findings Index Table ---
     lines.extend([
-        "## 4. Assessment Summary & Findings Index",
+        f"## {sec_num}. Assessment Summary & Findings Index",
         "| # | Check Module | Finding Summary (`user:pass` / Service / Vector) | Damage Score | CVSS | Severity |",
         "| :---: | :--- | :--- | :---: | :---: | :---: |",
     ])
+    sec_num += 1
     if not findings:
         lines.append("| - | *None* | No findings detected | 0.0 | - | INFO |")
     else:
@@ -224,15 +223,16 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
             )
             lines.append(f"| {idx} | `{f.check_name}` | {short_desc} | {score:.1f} | {cvss_str} | **{severity}** |")
 
-    # --- 5. Device Summary ---
+    # --- Device Summary ---
     lines.extend([
         "",
         "---",
         "",
-        "## 5. Device Summary",
+        f"## {sec_num}. Device Summary",
         "| Device ID | Findings Count | Total Damage Score | Max Damage Score | Max CVSS |",
         "| :--- | :---: | :---: | :---: | :---: |",
     ])
+    sec_num += 1
     if summary:
         for dev, s in summary.items():
             lines.append(
@@ -241,12 +241,12 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
     else:
         lines.append("| *None* | 0 | 0.0 | 0.0 | 0.0 |")
 
-    # --- 6. Detailed Findings ---
+    # --- Detailed Technical Findings ---
     lines.extend([
         "",
         "---",
         "",
-        "## 6. Detailed Technical Findings & Evidence",
+        f"## {sec_num}. Detailed Technical Findings & Evidence",
         "",
     ])
 
@@ -277,6 +277,102 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
                 f"  > {f.description.strip()}",
                 "",
             ])
+
+    return "\n".join(lines) + "\n"
+
+
+def generate_text_report(findings: list[Finding], weights: dict, generated_at: str) -> str:
+    summary = aggregate(findings, weights)
+    lines = [
+        "=" * 72,
+        "IoT Security Assessment Report",
+        f"Generated: {generated_at}",
+        f"Total Findings: {len(findings)}",
+        "=" * 72,
+        "",
+    ]
+
+    # --- 1. Discovered Credentials (pure user:hash list) ---
+    cred_items = []
+    for f in findings:
+        parsed = _parse_finding_cred(f)
+        if parsed:
+            score = f.damage_score(weights)
+            severity = "CRITICAL" if (f.cvss and f.cvss >= 9.0) or "<NO_PASSWORD>" in parsed["cred"] or "Backdoor" in parsed["type"] else (
+                "HIGH" if score >= 6 else ("MEDIUM" if score >= 3 else "LOW")
+            )
+            cred_items.append((parsed, severity, score))
+
+    if cred_items:
+        lines.extend([
+            "[DISCOVERED CREDENTIALS (USER:HASH)]",
+        ])
+        for c, _, _ in cred_items:
+            lines.append(f"{c['cred']}")
+        lines.extend([
+            "",
+            "[CREDENTIAL DETAILS]",
+            f"{'#':<3} {'ACCOUNT / HASH':<48} {'TYPE':<16} {'SOURCE':<14} {'SEVERITY':<8}",
+            "-" * 92,
+        ])
+        for idx, (c, sev, sc) in enumerate(cred_items, start=1):
+            cred_col = c['cred']
+            if len(cred_col) > 46:
+                cred_col = cred_col[:43] + "..."
+            lines.append(f"{idx:<3} {cred_col:<48} {c['type']:<16} {c['location']:<14} {sev:<8}")
+        lines.extend(["-" * 92, ""])
+
+    # --- 2. Discovered Services ---
+    svc_items = []
+    for f in findings:
+        parsed = _parse_finding_service(f)
+        if parsed:
+            svc_items.append(parsed)
+
+    if svc_items:
+        lines.extend([
+            "[DISCOVERED SERVICES & NETWORK DAEMONS]",
+            f"{'#':<3} {'SERVICE':<24} {'PORT':<6} {'CONFIG / SCRIPT':<24} {'DETAILS'}",
+            "-" * 80,
+        ])
+        for idx, s in enumerate(svc_items, start=1):
+            lines.append(f"{idx:<3} {s['service']:<24} {s['port']:<6} {s['config']:<24} {s['details']}")
+        lines.extend(["-" * 80, ""])
+
+    # --- 3. Hardcoded Secrets ---
+    secret_items = []
+    for f in findings:
+        parsed = _parse_finding_secret(f)
+        if parsed:
+            secret_items.append((parsed, f.damage_score(weights)))
+
+    if secret_items:
+        lines.extend([
+            "[HARDCODED TOKENS & SECRETS]",
+            f"{'#':<3} {'TYPE':<22} {'MASKED VALUE':<26} {'LOCATION':<20} {'SCORE'}",
+            "-" * 80,
+        ])
+        for idx, (sec, sc) in enumerate(secret_items, start=1):
+            lines.append(f"{idx:<3} {sec['type']:<22} {sec['value']:<26} {sec['location']:<20} {sc:.1f}")
+        lines.extend(["-" * 80, ""])
+
+    # --- 4. Summary Table ---
+    lines.extend([
+        "[FINDINGS SUMMARY]",
+        f"{'#':<3} {'CHECK':<22} {'SUMMARY':<46} {'SCORE':<6} {'CVSS':<6} {'SEVERITY'}",
+        "-" * 92,
+    ])
+    for idx, f in enumerate(findings, start=1):
+        s_desc = f.description.strip().replace("\n", " ")
+        if len(s_desc) > 44:
+            s_desc = s_desc[:41] + "..."
+        cvss_str = str(f.cvss) if f.cvss is not None else "-"
+        score = f.damage_score(weights)
+        severity = "CRITICAL" if (f.cvss and f.cvss >= 9.0) else (
+            "HIGH" if score >= 6 else ("MEDIUM" if score >= 3 else "LOW")
+        )
+        lines.append(f"{idx:<3} {f.check_name:<22} {s_desc:<46} {score:<6.1f} {cvss_str:<6} {severity}")
+    lines.extend(["-" * 92, ""])
 
     return "\n".join(lines) + "\n"
 
@@ -324,8 +420,14 @@ def write_reports(findings: list[Finding], weights: dict, output_dir: str | Path
         encoding="utf-8"
     )
 
+    # Save Markdown report
     md_path = output_dir / f"{basename}.md"
     md_content = generate_markdown_report(findings, weights, generated_at)
     md_path.write_text(md_content, encoding="utf-8")
 
-    return {"json": str(json_path), "html": str(html_path), "md": str(md_path)}
+    # Save Text report (.txt)
+    txt_path = output_dir / f"{basename}.txt"
+    txt_content = generate_text_report(findings, weights, generated_at)
+    txt_path.write_text(txt_content, encoding="utf-8")
+
+    return {"json": str(json_path), "html": str(html_path), "md": str(md_path), "txt": str(txt_path)}

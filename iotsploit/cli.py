@@ -300,43 +300,9 @@ def _run_action(args) -> list[Finding]:
         device_id = args.device_id or args.target
         target_path = Path(args.target)
 
-        # 1. Credential audit (/etc/passwd, /etc/shadow, hardcoded strings)
-        cred_findings = check_firmware_credentials(target_path, device_id=device_id, evidence_store=evidence)
-        findings = [f for f in cred_findings if not f.description.startswith("No credentials")]
-
-        # 2. Secret and token scan
-        secret_hits = scan_for_secrets(target_path)
-        if secret_hits:
-            evidence_path = None
-            if evidence:
-                evidence_path = evidence.save_json(
-                    _new_finding_id("firmware_secrets", device_id),
-                    "secrets_scan",
-                    {"hits": secret_hits},
-                )
-            for h in secret_hits[:8]:
-                findings.append(Finding(
-                    finding_id=_new_finding_id("firmware_secret", device_id),
-                    device_id=device_id,
-                    check_name="firmware_secret",
-                    description=f"{h['type']}: {h['masked_value']} [{h['file']}:{h['line']}]",
-                    cvss=7.5,
-                    damage={"privacy": 2, "chaining_depth": 1},
-                    evidence_path=evidence_path,
-                ))
-            if len(secret_hits) > 8:
-                findings.append(Finding(
-                    finding_id=_new_finding_id("firmware_secrets_more", device_id),
-                    device_id=device_id,
-                    check_name="firmware_secret",
-                    description=f"+{len(secret_hits) - 8} more hardcoded tokens (see evidence)",
-                    cvss=None,
-                    damage={"privacy": 1},
-                    evidence_path=evidence_path,
-                ))
-
-        # 3. Active service and daemon mapping
+        # Firmware audit: ONLY for active service and daemon configurations
         service_hits = map_firmware_services(target_path)
+        findings = []
         if service_hits:
             evidence_path = None
             if evidence:
@@ -374,7 +340,7 @@ def _run_action(args) -> list[Finding]:
                 finding_id=_new_finding_id("firmware_audit", device_id),
                 device_id=device_id,
                 check_name="firmware_audit",
-                description=f"No credentials, tokens, or known services identified under {args.target}.",
+                description=f"No active service or daemon configurations identified under {args.target}.",
                 cvss=None,
                 damage={},
             ))
@@ -524,7 +490,7 @@ def main():
         from pathlib import Path
         out_dir = Path(args.output) if args.output else Path(".")
         paths = write_reports(findings, weights, out_dir)
-        print(f"\n[+] Saved human-readable report: {paths['md']}")
+        print(f"\n[+] Saved human-readable report: {paths['txt']}")
         if args.output:
             print(f"[+] Saved HTML report: {paths['html']}")
             print(f"[+] Saved JSON report: {paths['json']}")

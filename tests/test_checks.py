@@ -133,10 +133,15 @@ class TestFirmwareAudit(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             paths = write_reports([test_finding], DEFAULT_WEIGHTS, tmpdir)
             self.assertTrue(Path(paths["md"]).exists())
+            self.assertTrue(Path(paths["txt"]).exists())
             content = Path(paths["md"]).read_text(encoding="utf-8")
             self.assertIn("# IoT Security & Damage Assessment Report", content)
             self.assertIn("Account 'root' has a crackable DES hash", content)
             self.assertIn("CRITICAL", content)
+
+            txt_content = Path(paths["txt"]).read_text(encoding="utf-8")
+            self.assertIn("IoT Security Assessment Report", txt_content)
+            self.assertIn("Account 'root' has a crackable DES hash", txt_content)
 
     def test_firmware_credentials_user_hash_format(self):
         from iotsploit.checks.firmware_checks import check_firmware_credentials
