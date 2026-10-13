@@ -102,6 +102,23 @@ class TestFirmwareAudit(unittest.TestCase):
             self.assertTrue("*" in aws_hit["masked_value"])
             self.assertNotIn("AKIA1234567890ABCDEF", aws_hit["masked_value"])
 
+    def test_map_firmware_services(self):
+        from iotsploit.checks.firmware_audit import map_firmware_services
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            cfg_dir = tmp_path / "etc" / "config"
+            cfg_dir.mkdir(parents=True)
+            (cfg_dir / "dropbear").write_text("config dropbear\n\toption Port '22'\n")
+            (cfg_dir / "wireless").write_text("config wifi-iface\n\toption key 'SuperSecretWPAKey123'\n")
+
+            services = map_firmware_services(tmp_path)
+            self.assertEqual(len(services), 2)
+            ssh_service = next(s for s in services if "SSH" in s["service"])
+            self.assertEqual(ssh_service["default_port"], 22)
+            wifi_service = next(s for s in services if "Wi-Fi" in s["service"])
+            self.assertTrue(wifi_service["masked_value"].startswith("Supe"))
+            self.assertTrue("*" in wifi_service["masked_value"])
+
 
 if __name__ == "__main__":
     unittest.main()

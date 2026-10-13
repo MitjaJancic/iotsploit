@@ -61,7 +61,7 @@ from iotsploit.checks.book_checks import (
     check_modbus_unauth_read,
 )
 from iotsploit.checks.firmware_checks import check_firmware_credentials
-from iotsploit.checks.firmware_audit import scan_for_secrets
+from iotsploit.checks.firmware_audit import scan_for_secrets, map_firmware_services
 from iotsploit.checks.coap_checks import check_coap_auth
 
 # module -> {action: one-line help}, purely for --help / listing.
@@ -298,34 +298,60 @@ def _run_action(args) -> list[Finding]:
         from pathlib import Path
         _require_target(args, "a path to an extracted firmware filesystem")
         device_id = args.device_id or args.target
-        secret_hits = scan_for_secrets(Path(args.target))
-        if not secret_hits:
-            return [Finding(
+        target_path = Path(args.target)
+        secret_hits = scan_for_secrets(target_path)
+        service_hits = map_firmware_services(target_path)
+
+        findings = []
+        if secret_hits:
+            evidence_path = None
+            if evidence:
+                evidence_path = evidence.save_json(
+                    _new_finding_id("firmware_secrets", device_id),
+                    "secrets_scan",
+                    {"hits": secret_hits},
+                )
+            sample = "; ".join(f"{h['file']}:{h['line']} ({h['type']})" for h in secret_hits[:5])
+            more = f" (+{len(secret_hits) - 5} more)" if len(secret_hits) > 5 else ""
+            findings.append(Finding(
                 finding_id=_new_finding_id("firmware_secrets", device_id),
                 device_id=device_id,
                 check_name="firmware_secrets",
-                description=f"No hardcoded tokens, API keys, or high-entropy secrets identified under {args.target}.",
+                description=f"Found {len(secret_hits)} hardcoded token/secret pattern(s) in firmware: {sample}{more}",
+                cvss=7.5,
+                damage={"privacy": 2, "chaining_depth": 2},
+                evidence_path=evidence_path,
+            ))
+
+        if service_hits:
+            evidence_path = None
+            if evidence:
+                evidence_path = evidence.save_json(
+                    _new_finding_id("firmware_services", device_id),
+                    "service_mapping",
+                    {"services": service_hits},
+                )
+            service_summary = ", ".join(s["service"] for s in service_hits[:5])
+            findings.append(Finding(
+                finding_id=_new_finding_id("firmware_services", device_id),
+                device_id=device_id,
+                check_name="firmware_services",
+                description=f"Mapped {len(service_hits)} active service/daemon configuration(s): {service_summary}",
+                cvss=5.3,
+                damage={"availability": 1, "chaining_depth": 1},
+                evidence_path=evidence_path,
+            ))
+
+        if not findings:
+            findings.append(Finding(
+                finding_id=_new_finding_id("firmware_audit", device_id),
+                device_id=device_id,
+                check_name="firmware_audit",
+                description=f"No hardcoded tokens, API keys, or known service configurations identified under {args.target}.",
                 cvss=None,
                 damage={},
-            )]
-        evidence_path = None
-        if evidence:
-            evidence_path = evidence.save_json(
-                _new_finding_id("firmware_secrets", device_id),
-                "secrets_scan",
-                {"hits": secret_hits},
-            )
-        sample = "; ".join(f"{h['file']}:{h['line']} ({h['type']})" for h in secret_hits[:5])
-        more = f" (+{len(secret_hits) - 5} more)" if len(secret_hits) > 5 else ""
-        return [Finding(
-            finding_id=_new_finding_id("firmware_secrets", device_id),
-            device_id=device_id,
-            check_name="firmware_secrets",
-            description=f"Found {len(secret_hits)} hardcoded token/secret pattern(s) in firmware: {sample}{more}",
-            cvss=7.5,
-            damage={"privacy": 2, "chaining_depth": 2},
-            evidence_path=evidence_path,
-        )]
+            ))
+        return findings
 
     # --- profile-driven modules below ---
     profiles = _resolve_profiles(args)

@@ -117,3 +117,79 @@ def scan_for_secrets(extract_dir: Path) -> list[dict[str, Any]]:
                 continue
 
     return findings
+
+
+def map_firmware_services(extract_dir: Path) -> list[dict[str, Any]]:
+    """
+    Statically audits extracted firmware startup scripts and daemon configurations
+    (OpenWrt /etc/config/, /etc/init.d/, systemd) to inventory active services
+    and inspect them for default credentials or insecure configurations.
+    """
+    extract_dir = Path(extract_dir)
+    discovered_services: list[dict[str, Any]] = []
+
+    if not extract_dir.exists() or not extract_dir.is_dir():
+        return discovered_services
+
+    # 1. Inspect OpenWrt UCI configuration (/etc/config/)
+    etc_config = extract_dir / "etc" / "config"
+    if etc_config.is_dir():
+        for conf_file in etc_config.glob("*"):
+            if not conf_file.is_file():
+                continue
+            try:
+                content = conf_file.read_text(errors="ignore")
+
+                # Check for dropbear (SSH) configuration
+                if conf_file.name == "dropbear":
+                    has_root_pw = "option RootPasswordAuth 'off'" not in content
+                    has_pw_auth = "option PasswordAuth 'off'" not in content
+                    discovered_services.append({
+                        "service": "SSH (Dropbear)",
+                        "config_file": str(conf_file.relative_to(extract_dir)),
+                        "default_port": 22,
+                        "password_auth_enabled": has_pw_auth,
+                        "root_login_allowed": has_root_pw,
+                    })
+
+                # Check for uhttpd (Web interface)
+                elif conf_file.name == "uhttpd":
+                    discovered_services.append({
+                        "service": "Web Server (uhttpd)",
+                        "config_file": str(conf_file.relative_to(extract_dir)),
+                        "default_port": 80,
+                    })
+
+                # Check for wireless configuration (default SSIDs/keys)
+                elif conf_file.name == "wireless":
+                    for match in re.finditer(r"option\s+key\s+['\"]([^'\"]+)['\"]", content):
+                        raw_key = match.group(1)
+                        discovered_services.append({
+                            "service": "Wi-Fi (Hostapd)",
+                            "config_file": str(conf_file.relative_to(extract_dir)),
+                            "credential_type": "WPA_Key",
+                            "masked_value": _mask_token(raw_key),
+                        })
+            except (OSError, PermissionError):
+                continue
+
+    # 2. Inspect /etc/init.d/ daemon scripts for telnetd and embedded services
+    init_dir = extract_dir / "etc" / "init.d"
+    if init_dir.is_dir():
+        for init_script in init_dir.glob("*"):
+            if not init_script.is_file():
+                continue
+            try:
+                content = init_script.read_text(errors="ignore")
+                if "telnetd" in content:
+                    discovered_services.append({
+                        "service": "Telnet Daemon",
+                        "script": str(init_script.relative_to(extract_dir)),
+                        "default_port": 23,
+                        "note": "Telnet service script present in init.d",
+                    })
+            except (OSError, PermissionError):
+                continue
+
+    return discovered_services
+
