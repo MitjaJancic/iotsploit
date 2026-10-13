@@ -33,6 +33,9 @@ network:
   mqtt:
     topic_prefix: "device-XXXXXX"
     expected_tls: true             # true = check_mqtt_tls flags a finding if plaintext connect succeeds
+    credentials_to_test:           # optional: explicit test accounts (for check_mqtt_auth_enforcement)
+      - username: "testuser"
+        password: "testpassword"
 
   coap:
     endpoints:

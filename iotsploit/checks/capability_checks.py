@@ -36,6 +36,7 @@ from __future__ import annotations
 import socket
 import ssl
 import uuid
+from typing import Any
 
 import requests
 
@@ -383,3 +384,301 @@ def check_known_cves(profile: DeviceProfile, firmware_version: str | None = None
             damage=cve.damage,
         ))
     return findings
+
+
+def check_mqtt_auth_enforcement(profile: DeviceProfile, ip: str, port: int = 1883,
+                                evidence_store=None) -> list[Finding]:
+    """
+    Tests whether an MQTT broker enforces authentication using CONNECT-only packets.
+    Tests:
+    1. Anonymous connection attempt.
+    2. Credentials explicitly declared in profile.mqtt_credentials_to_test.
+    Disconnects immediately upon handshake completion (no publish/subscribe, no dictionary attack).
+    """
+    findings = []
+    if not profile.supports("mqtt"):
+        return findings
+
+    try:
+        import paho.mqtt.client as mqtt
+    except ImportError:
+        return findings
+
+    import time
+
+    def _probe_connect(username: str | None = None, password: str | None = None,
+                       timeout: float = 4.0) -> tuple[int | None, str | None]:
+        res: dict[str, Any] = {"rc": None, "error": None}
+
+        def on_connect(client, userdata, flags, rc, properties=None):
+            res["rc"] = rc
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+
+        client_kwargs: dict[str, Any] = {
+            "client_id": f"iotsploit-{uuid.uuid4().hex[:6]}",
+            "protocol": mqtt.MQTTv311,
+        }
+        if hasattr(mqtt, "CallbackAPIVersion"):
+            client_kwargs["callback_api_version"] = mqtt.CallbackAPIVersion.VERSION1
+
+        try:
+            client = mqtt.Client(**client_kwargs)
+            client.on_connect = on_connect
+            if username is not None:
+                client.username_pw_set(username, password)
+            client.connect(ip, port, keepalive=10)
+            client.loop_start()
+
+            waited = 0.0
+            while res["rc"] is None and waited < timeout:
+                time.sleep(0.05)
+                waited += 0.05
+
+            client.loop_stop()
+            try:
+                client.disconnect()
+            except Exception:
+                pass
+        except Exception as exc:
+            res["error"] = str(exc)
+
+        return res["rc"], res["error"]
+
+    # 1. Anonymous CONNECT probe
+    anon_rc, _ = _probe_connect()
+    if anon_rc == 0:
+        fid = _new_finding_id("mqtt_anon_auth", profile.device_id)
+        evidence_path = None
+        if evidence_store:
+            evidence_path = evidence_store.save_json(
+                fid, "anonymous_connect",
+                {"ip": ip, "port": port, "connack_rc": 0, "status": "accepted"}
+            )
+        findings.append(Finding(
+            finding_id=fid,
+            device_id=profile.device_id,
+            check_name="mqtt_auth_enforcement",
+            description=f"MQTT broker at {ip}:{port} accepted anonymous (unauthenticated) connection.",
+            cvss=7.5,
+            damage={"privacy": 2, "availability": 1, "chaining_depth": 1},
+            evidence_path=evidence_path,
+        ))
+
+    # 2. Declared credentials check (explicitly declared in profile only)
+    creds_to_test = getattr(profile, "mqtt_credentials_to_test", []) or []
+    for cred in creds_to_test:
+        raw_user = cred.get("username", "")
+        raw_pass = cred.get("password", "")
+        rc, _ = _probe_connect(username=raw_user, password=raw_pass)
+
+        # Mask sensitive values in output
+        masked_user = (raw_user[:4] + "***") if len(raw_user) > 4 else "***"
+        if rc == 0:
+            fid = _new_finding_id("mqtt_cred_auth", profile.device_id)
+            evidence_path = None
+            if evidence_store:
+                evidence_path = evidence_store.save_json(
+                    fid, "declared_credential",
+                    {"ip": ip, "port": port, "username": masked_user, "connack_rc": 0, "status": "accepted"}
+                )
+            findings.append(Finding(
+                finding_id=fid,
+                device_id=profile.device_id,
+                check_name="mqtt_auth_enforcement",
+                description=f"MQTT broker at {ip}:{port} accepted valid credentials for account '{masked_user}'.",
+                cvss=6.5,
+                damage={"privacy": 2, "availability": 1, "chaining_depth": 1},
+                evidence_path=evidence_path,
+            ))
+
+    return findings
+
+
+def check_ble_access_control(profile: DeviceProfile, allow_state_changes: bool = False,
+                             evidence_store=None) -> list[Finding]:
+    """
+    Audits GATT characteristic permissions metadata via passive inspection.
+    Discovers device matching profile.ble_name_pattern and reads characteristic
+    properties/metadata ONLY (no writes). Flags characteristics with 'write' or
+    'write-without-response' that lack 'encrypt-write' or 'authenticated-signed-writes'.
+    Never modifies device state.
+    """
+    import asyncio
+    findings = []
+    if not profile.supports("ble") or not profile.ble_name_pattern:
+        return findings
+
+    try:
+        from bleak import BleakClient, BleakScanner
+    except ImportError:
+        return findings
+
+    async def _inspect() -> list[Finding]:
+        local_findings = []
+        pattern = profile.ble_name_pattern.lower()
+        devices = await BleakScanner.discover(timeout=5.0)
+        target = next((d for d in devices if pattern in (d.name or "").lower()), None)
+        if not target:
+            return local_findings
+
+        insecure_chars = []
+        try:
+            async with BleakClient(target.address, timeout=10.0) as client:
+                for service in client.services:
+                    for char in service.characteristics:
+                        props = [p.lower() for p in char.properties]
+                        has_write = "write" in props or "write-without-response" in props
+                        has_auth = "encrypt-write" in props or "authenticated-signed-writes" in props
+                        if has_write and not has_auth:
+                            insecure_chars.append({
+                                "service_uuid": str(service.uuid),
+                                "characteristic_uuid": str(char.uuid),
+                                "properties": props,
+                            })
+        except Exception:
+            return local_findings
+
+        if insecure_chars:
+            fid = _new_finding_id("ble_access_control", profile.device_id)
+            evidence_path = None
+            if evidence_store:
+                evidence_path = evidence_store.save_json(
+                    fid, "insecure_characteristics",
+                    {
+                        "device_address": target.address,
+                        "device_name": target.name,
+                        "characteristics": insecure_chars,
+                    }
+                )
+            sample_uuids = ", ".join(c["characteristic_uuid"] for c in insecure_chars[:3])
+            more = f" (+{len(insecure_chars) - 3} more)" if len(insecure_chars) > 3 else ""
+            local_findings.append(Finding(
+                finding_id=fid,
+                device_id=profile.device_id,
+                check_name="ble_access_control",
+                description=(
+                    f"GATT characteristic access control weakness: found {len(insecure_chars)} "
+                    f"characteristic(s) allowing write operations without encryption/authentication: "
+                    f"{sample_uuids}{more}"
+                ),
+                cvss=6.8,
+                damage={"physical_safety": 1, "privacy": 1, "availability": 1, "chaining_depth": 1},
+                evidence_path=evidence_path,
+            ))
+        return local_findings
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _inspect()).result()
+    else:
+        return asyncio.run(_inspect())
+
+
+def check_coap_auth_enforcement(profile: DeviceProfile, ip: str,
+                                allow_state_changes: bool = False,
+                                evidence_store=None) -> list[Finding]:
+    """
+    Assesses CoAP endpoint authentication enforcement.
+    Sends read-only GET requests to all profile.coap_endpoints by default.
+    Sends PUT/POST ONLY if allow_state_changes=True AND endpoint declares method as PUT/POST.
+    Uses aiocoap Context; shuts down protocol after testing.
+    """
+    import asyncio
+    findings = []
+    if not profile.coap_endpoints:
+        return findings
+
+    try:
+        import aiocoap
+        from aiocoap import Message, Code
+    except ImportError:
+        return findings
+
+    async def _run_coap() -> list[Finding]:
+        local_findings = []
+        try:
+            context = await aiocoap.Context.create_client_context()
+        except Exception:
+            return local_findings
+
+        try:
+            for endpoint in profile.coap_endpoints:
+                method = (endpoint.method or "GET").upper()
+
+                # Dual authorization gate check for state-changing methods
+                if method in ("PUT", "POST") and not allow_state_changes:
+                    local_findings.append(Finding(
+                        finding_id=_new_finding_id("coap_auth_skipped", profile.device_id),
+                        device_id=profile.device_id,
+                        check_name="coap_auth_enforcement",
+                        description=f"Skipped (state-changing {method} request not authorized): {endpoint.path}",
+                        cvss=None,
+                        damage={},
+                    ))
+                    continue
+
+                code = Code.GET
+                if method == "PUT" and allow_state_changes:
+                    code = Code.PUT
+                elif method == "POST" and allow_state_changes:
+                    code = Code.POST
+
+                uri = f"coap://{ip}/{endpoint.path.lstrip('/')}"
+                request = Message(code=code, uri=uri)
+
+                try:
+                    response = await asyncio.wait_for(context.request(request).response, timeout=4.0)
+                    is_success = response.code.is_successful()
+                    resp_code = str(response.code)
+                    payload_preview = repr(response.payload[:200])
+                except Exception as exc:
+                    is_success = False
+                    resp_code = None
+                    payload_preview = str(exc)
+
+                fid = _new_finding_id("coap_auth", profile.device_id)
+                evidence_path = None
+                if evidence_store:
+                    evidence_path = evidence_store.save_text(
+                        fid, "response",
+                        f"URI: {uri}\nMethod: {method}\nResponse Code: {resp_code}\nPayload: {payload_preview}",
+                    )
+
+                if is_success and endpoint.expect_auth:
+                    local_findings.append(Finding(
+                        finding_id=fid,
+                        device_id=profile.device_id,
+                        check_name="coap_auth_enforcement",
+                        description=(
+                            f"CoAP {method} {endpoint.path}: accepted WITHOUT authentication "
+                            f"(response code {resp_code}) when authentication was expected."
+                        ),
+                        cvss=7.5,
+                        damage={"physical_safety": 1, "privacy": 2, "availability": 1, "chaining_depth": 1},
+                        evidence_path=evidence_path,
+                    ))
+        finally:
+            await context.shutdown()
+
+        return local_findings
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, _run_coap()).result()
+    else:
+        return asyncio.run(_run_coap())

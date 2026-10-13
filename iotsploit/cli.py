@@ -48,6 +48,10 @@ from iotsploit.checks.capability_checks import (
     check_ble_advertising,
     check_known_cves,
     check_flagged_ports,
+    check_mqtt_auth_enforcement,
+    check_ble_access_control,
+    check_coap_auth_enforcement,
+    _new_finding_id,
 )
 from iotsploit.checks.book_checks import (
     check_mqtt_anonymous,
@@ -57,6 +61,7 @@ from iotsploit.checks.book_checks import (
     check_modbus_unauth_read,
 )
 from iotsploit.checks.firmware_checks import check_firmware_credentials
+from iotsploit.checks.firmware_audit import scan_for_secrets
 from iotsploit.checks.coap_checks import check_coap_auth
 
 # module -> {action: one-line help}, purely for --help / listing.
@@ -69,6 +74,7 @@ MODULES = {
     "mqtt": {
         "test": "Check whether a broker expected to use TLS still accepts plaintext.",
         "anon-check": "Attempt a full anonymous CONNECT against a broker (Practical IoT Hacking, ch.4).",
+        "auth-check": "Test MQTT anonymous access and profile-declared credentials (CONNECT-only).",
     },
     "upnp": {
         "enum": "SSDP-discover UPnP devices and fingerprint via description XML (ch.4 + ch.6).",
@@ -81,13 +87,15 @@ MODULES = {
         "check": "Unauthenticated read-only Modbus holding-register probe.",
     },
     "coap": {
-        "check": "Read-only CoAP GET missing-authentication probe (GET only, never PUT/POST).",
+        "check": "CoAP authentication enforcement probe (GET by default, PUT/POST needs authorization).",
     },
     "firmware": {
         "scan": "Static credential scan of an already-extracted firmware filesystem (ch.9).",
+        "audit": "Static scan for API keys, tokens, and high-entropy strings.",
     },
     "ble": {
         "scan": "Passive BLE advertisement scan matching the profile's name pattern.",
+        "access-check": "Audit GATT characteristic write permissions for missing encryption/auth.",
     },
     "ports": {
         "scan": "Connect-scan the profile's flagged_ports list.",
@@ -282,6 +290,39 @@ def _run_action(args) -> list[Finding]:
         device_id = args.device_id or args.target
         return check_firmware_credentials(args.target, device_id=device_id, evidence_store=evidence)
 
+    if args.module == "firmware" and args.action == "audit":
+        from pathlib import Path
+        _require_target(args, "a path to an extracted firmware filesystem")
+        device_id = args.device_id or args.target
+        secret_hits = scan_for_secrets(Path(args.target))
+        if not secret_hits:
+            return [Finding(
+                finding_id=_new_finding_id("firmware_secrets", device_id),
+                device_id=device_id,
+                check_name="firmware_secrets",
+                description=f"No hardcoded tokens, API keys, or high-entropy secrets identified under {args.target}.",
+                cvss=None,
+                damage={},
+            )]
+        evidence_path = None
+        if evidence:
+            evidence_path = evidence.save_json(
+                _new_finding_id("firmware_secrets", device_id),
+                "secrets_scan",
+                {"hits": secret_hits},
+            )
+        sample = "; ".join(f"{h['file']}:{h['line']} ({h['type']})" for h in secret_hits[:5])
+        more = f" (+{len(secret_hits) - 5} more)" if len(secret_hits) > 5 else ""
+        return [Finding(
+            finding_id=_new_finding_id("firmware_secrets", device_id),
+            device_id=device_id,
+            check_name="firmware_secrets",
+            description=f"Found {len(secret_hits)} hardcoded token/secret pattern(s) in firmware: {sample}{more}",
+            cvss=7.5,
+            damage={"privacy": 2, "chaining_depth": 2},
+            evidence_path=evidence_path,
+        )]
+
     # --- profile-driven modules below ---
     profiles = _resolve_profiles(args)
 
@@ -319,7 +360,12 @@ def _run_action(args) -> list[Finding]:
             if not p.coap_endpoints:
                 _note(args, f"{p.device_id} has no coap endpoints declared, skipping")
                 continue
-            findings += check_coap_auth(p, args.target, port=args.port or 5683, evidence_store=evidence)
+            try:
+                findings += check_coap_auth_enforcement(
+                    p, args.target, allow_state_changes=_is_authorized(args, p), evidence_store=evidence
+                )
+            except Exception:
+                findings += check_coap_auth(p, args.target, port=args.port or 5683, evidence_store=evidence)
         return findings
 
     if args.module == "mqtt" and args.action == "test":
@@ -331,11 +377,30 @@ def _run_action(args) -> list[Finding]:
             findings += check_mqtt_tls(p, args.target, args.port or 1883, evidence_store=evidence)
         return findings
 
+    if args.module == "mqtt" and args.action == "auth-check":
+        _require_target(args)
+        for p in profiles:
+            if not p.supports("mqtt"):
+                _note(args, f"{p.device_id} does not declare mqtt, skipping")
+                continue
+            findings += check_mqtt_auth_enforcement(p, args.target, args.port or 1883, evidence_store=evidence)
+        return findings
+
     if args.module == "ble" and args.action == "scan":
         ble_profiles = [p for p in profiles if p.supports("ble")]
         if not ble_profiles:
             _note(args, "no profile in scope declares ble")
         return asyncio.run(_run_ble(ble_profiles, evidence))
+
+    if args.module == "ble" and args.action == "access-check":
+        ble_profiles = [p for p in profiles if p.supports("ble")]
+        if not ble_profiles:
+            _note(args, "no profile in scope declares ble")
+        for p in ble_profiles:
+            findings += check_ble_access_control(
+                p, allow_state_changes=_is_authorized(args, p), evidence_store=evidence
+            )
+        return findings
 
     if args.module == "ports" and args.action == "scan":
         _require_target(args)
@@ -367,11 +432,18 @@ def _run_action(args) -> list[Finding]:
                 findings += check_mqtt_tls(p, args.target, args.port or 1883, evidence_store=evidence)
                 findings += check_mqtt_anonymous(args.target, args.port or 1883, device_id=p.device_id,
                                                   evidence_store=evidence)
+                findings += check_mqtt_auth_enforcement(p, args.target, args.port or 1883, evidence_store=evidence)
+            if p.coap_endpoints:
+                findings += check_coap_auth_enforcement(p, args.target, allow_state_changes=_is_authorized(args, p),
+                                                         evidence_store=evidence)
             if p.flagged_ports:
                 findings += check_flagged_ports(p, args.target, evidence_store=evidence)
         ble_profiles = [p for p in profiles if p.supports("ble")]
         if ble_profiles:
             findings += asyncio.run(_run_ble(ble_profiles, evidence))
+            for p in ble_profiles:
+                findings += check_ble_access_control(p, allow_state_changes=_is_authorized(args, p),
+                                                     evidence_store=evidence)
         return findings
 
     return findings

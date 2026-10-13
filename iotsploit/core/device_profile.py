@@ -62,6 +62,7 @@ class DeviceProfile:
     coap_endpoints: list[HttpEndpoint]
     authorized: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
+    mqtt_credentials_to_test: list[dict[str, str]] = field(default_factory=list)
 
     def supports(self, protocol: str) -> bool:
         return protocol in self.protocols
@@ -85,11 +86,12 @@ def _parse_http(raw: dict) -> tuple[str | None, list[HttpEndpoint]]:
     return base_url, endpoints
 
 
-def _parse_mqtt(raw: dict) -> tuple[str | None, bool]:
+def _parse_mqtt(raw: dict) -> tuple[str | None, bool, list[dict]]:
     mqtt_cfg = raw.get("network", {}).get("mqtt")
     if not mqtt_cfg:
-        return None, False
-    return mqtt_cfg.get("topic_prefix"), bool(mqtt_cfg.get("expected_tls", False))
+        return None, False, []
+    creds = mqtt_cfg.get("credentials_to_test", [])
+    return mqtt_cfg.get("topic_prefix"), bool(mqtt_cfg.get("expected_tls", False)), creds
 
 
 def _parse_ble(raw: dict) -> str | None:
@@ -141,7 +143,7 @@ def load_profile(path: str | Path) -> DeviceProfile:
     raw = yaml.safe_load(path.read_text())
 
     http_base_url, http_endpoints = _parse_http(raw)
-    mqtt_prefix, mqtt_tls = _parse_mqtt(raw)
+    mqtt_prefix, mqtt_tls, mqtt_creds = _parse_mqtt(raw)
     ble_pattern = _parse_ble(raw)
 
     return DeviceProfile(
@@ -159,6 +161,7 @@ def load_profile(path: str | Path) -> DeviceProfile:
         coap_endpoints=_parse_coap(raw),
         authorized=bool(raw.get("authorized", False)),
         raw=raw,
+        mqtt_credentials_to_test=mqtt_creds,
     )
 
 

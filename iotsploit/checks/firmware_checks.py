@@ -26,6 +26,7 @@ import uuid
 from pathlib import Path
 
 from iotsploit.core.scoring import Finding
+from iotsploit.checks.firmware_audit import scan_for_secrets
 
 # Hash-prefix -> human name, for crypt(3)-style /etc/shadow fields.
 _HASH_PREFIXES = {
