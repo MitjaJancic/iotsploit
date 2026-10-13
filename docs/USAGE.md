@@ -43,12 +43,15 @@ Metasploit-style: `iotsploit <module> <action> [target] [options]`
 | `audit` | `run` | yes (IP) | runs every applicable module above in one pass |
 | `profiles` | `list` / `show` | no | discovery — list profiles, or dump one profile's full YAML as JSON |
 | `mqtt` | `anon-check` | yes (IP) | full anonymous CONNECT attempt (not just a TCP probe) — from *Practical IoT Hacking* ch.4 |
+| `mqtt` | `auth-check` | yes (broker IP) | `check_mqtt_auth_enforcement` — tests anonymous CONNECT + profile-declared credentials |
 | `upnp` | `enum` | no (or `--location`) | SSDP-discover + fingerprint via description XML — ch.4 + ch.6 |
 | `upnp` | `wan-check` | needs `--location` | read-only WANIPConnection probe — ch.6 |
 | `wsd` | `scan` | no | WS-Discovery Probe for ONVIF-style devices — ch.6 |
 | `modbus` | `check` | yes (IP) | unauthenticated read-only holding-register probe |
 | `firmware` | `scan` | yes (filesystem path) | static passwd/shadow/hardcoded-credential scan — ch.9 |
-| `coap` | `check` | yes (IP) | read-only CoAP GET missing-auth probe (GET only, never PUT/POST) |
+| `firmware` | `audit` | yes (filesystem path) | `scan_for_secrets` — API keys, tokens, and Shannon entropy scan |
+| `coap` | `check` | yes (IP) | `check_coap_auth_enforcement` — CoAP endpoint auth probe (GET default, PUT/POST gated) |
+| `ble` | `access-check` | no | `check_ble_access_control` — passive GATT characteristic write permissions audit |
 
 The last six are **profile-independent** — `--device-id` only labels the finding, it's never looked up against `--profiles-dir`, so these work against any target with zero profiles configured. See "Checks from *Practical IoT Hacking*" below for what each is actually testing and why it stops where it does.
 
