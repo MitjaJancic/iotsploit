@@ -164,6 +164,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "already set 'authorized: true' itself - put it there once per device instead of passing "
              "this every time.",
     )
+    opts.add_argument(
+        "--dev", action="store_true",
+        help="Development/lab mode: automatically treats all targets as authorized for this run "
+             "to streamline rapid testing and iteration without editing profile YAMLs.",
+    )
     opts.add_argument("--json", action="store_true", help="Print findings as JSON instead of a table.")
     opts.add_argument("-v", "--verbose", action="store_true", help="Print profile load / skip notes to stderr.")
 
@@ -185,9 +190,8 @@ def _resolve_profiles(args) -> list[DeviceProfile]:
 
 def _is_authorized(args, profile: DeviceProfile) -> bool:
     """A profile's own authorized: true satisfies the gate permanently;
-    --authorized satisfies it for this one run (e.g. for a profile-less
-    one-off, or a profile you haven't marked yet)."""
-    return args.authorized or profile.authorized
+    --authorized or --dev satisfies it for this run (streamlining lab development)."""
+    return getattr(args, "dev", False) or args.authorized or profile.authorized
 
 
 def _note(args, msg: str):

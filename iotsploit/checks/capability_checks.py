@@ -35,10 +35,15 @@ from __future__ import annotations
 
 import socket
 import ssl
+import urllib.request
+import urllib.error
 import uuid
 from typing import Any
 
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 
 from iotsploit.core.device_profile import DeviceProfile
 from iotsploit.core.scoring import Finding
@@ -47,6 +52,18 @@ from iotsploit.recon.port_scan import scan_host
 
 def _new_finding_id(check_name: str, device_id: str) -> str:
     return f"{device_id}_{check_name}_{uuid.uuid4().hex[:8]}"
+
+
+def skipped_finding(check_name: str, device_id: str, reason: str) -> Finding:
+    """Standard helper to generate a skipped finding when authorization is absent."""
+    return Finding(
+        finding_id=_new_finding_id(f"{check_name}_skipped", device_id),
+        device_id=device_id,
+        check_name=check_name,
+        description=f"Skipped (authorization required): {reason}",
+        cvss=None,
+        damage={},
+    )
 
 
 def check_http_auth(profile: DeviceProfile, ip: str, allow_state_changes: bool = False,
@@ -67,37 +84,49 @@ def check_http_auth(profile: DeviceProfile, ip: str, allow_state_changes: bool =
         if not endpoint.expect_auth:
             continue
         if not allow_state_changes:
-            findings.append(Finding(
-                finding_id=_new_finding_id("http_auth_skipped", profile.device_id),
-                device_id=profile.device_id,
-                check_name="http_auth",
-                description=(
-                    f"Skipped (state-changing request not authorized): "
-                    f"{endpoint.method} {endpoint.path} - {endpoint.description}"
-                ),
-                cvss=None,
-                damage={},
+            findings.append(skipped_finding(
+                "http_auth", profile.device_id,
+                f"{endpoint.method} {endpoint.path} - {endpoint.description}"
             ))
             continue
 
         url = profile.http_base_url.format(ip=ip) + endpoint.path
-        try:
-            resp = requests.request(endpoint.method, url, timeout=3)
-            unauthenticated_success = resp.status_code < 400
-        except requests.RequestException as exc:
-            unauthenticated_success = False
-            resp = None
-            error = str(exc)
+        status_code = None
+        resp_body = ""
+        error = None
+
+        if requests is not None:
+            try:
+                resp = requests.request(endpoint.method, url, timeout=3)
+                status_code = resp.status_code
+                resp_body = resp.text
+                unauthenticated_success = status_code < 400
+            except requests.RequestException as exc:
+                unauthenticated_success = False
+                error = str(exc)
         else:
-            error = None
+            try:
+                req = urllib.request.Request(url, method=endpoint.method)
+                with urllib.request.urlopen(req, timeout=3) as resp_obj:
+                    status_code = resp_obj.status
+                    resp_body = resp_obj.read().decode("utf-8", errors="replace")
+                    unauthenticated_success = status_code < 400
+            except urllib.error.HTTPError as exc:
+                status_code = exc.code
+                resp_body = exc.read().decode("utf-8", errors="replace")
+                unauthenticated_success = status_code < 400
+                error = str(exc)
+            except Exception as exc:
+                unauthenticated_success = False
+                error = str(exc)
 
         evidence_path = None
         if evidence_store:
             evidence_path = evidence_store.save_text(
                 _new_finding_id("http_auth", profile.device_id),
                 "response",
-                f"URL: {url}\nStatus: {getattr(resp, 'status_code', None)}\n"
-                f"Body: {getattr(resp, 'text', '')[:2000]}\nError: {error}",
+                f"URL: {url}\nStatus: {status_code}\n"
+                f"Body: {resp_body[:2000]}\nError: {error}",
             )
 
         findings.append(Finding(
@@ -279,15 +308,9 @@ def check_http_injection(profile: DeviceProfile, ip: str, allow_state_changes: b
             continue
 
         if not allow_state_changes:
-            findings.append(Finding(
-                finding_id=_new_finding_id("http_injection_skipped", profile.device_id),
-                device_id=profile.device_id,
-                check_name="http_injection",
-                description=(
-                    f"Skipped (not authorized): {endpoint.method} {endpoint.path}, "
-                    f"params={endpoint.injectable_params}"
-                ),
-                cvss=None, damage={},
+            findings.append(skipped_finding(
+                "http_injection", profile.device_id,
+                f"{endpoint.method} {endpoint.path}, params={endpoint.injectable_params}"
             ))
             continue
 
@@ -616,13 +639,9 @@ def check_coap_auth_enforcement(profile: DeviceProfile, ip: str,
 
                 # Dual authorization gate check for state-changing methods
                 if method in ("PUT", "POST") and not allow_state_changes:
-                    local_findings.append(Finding(
-                        finding_id=_new_finding_id("coap_auth_skipped", profile.device_id),
-                        device_id=profile.device_id,
-                        check_name="coap_auth_enforcement",
-                        description=f"Skipped (state-changing {method} request not authorized): {endpoint.path}",
-                        cvss=None,
-                        damage={},
+                    local_findings.append(skipped_finding(
+                        "coap_auth_enforcement", profile.device_id,
+                        f"state-changing {method} {endpoint.path}"
                     ))
                     continue
 

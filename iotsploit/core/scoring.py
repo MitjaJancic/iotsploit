@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from pathlib import Path
-import yaml
 
 DIMENSIONS = ["physical_safety", "privacy", "financial", "availability", "chaining_depth"]
 
@@ -59,6 +58,7 @@ def load_weights(path: str | Path | None) -> dict:
     """
     if path is None:
         return dict(DEFAULT_WEIGHTS)
+    import yaml
     raw = yaml.safe_load(Path(path).read_text())
     weights = dict(DEFAULT_WEIGHTS)
     weights.update(raw or {})

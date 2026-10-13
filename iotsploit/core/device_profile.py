@@ -9,7 +9,6 @@ or core/. See profiles/_template.yaml for the schema with comments.
 
 from __future__ import annotations
 
-import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -139,6 +138,7 @@ def _parse_flagged_ports(raw: dict) -> list[FlaggedPort]:
 
 
 def load_profile(path: str | Path) -> DeviceProfile:
+    import yaml
     path = Path(path)
     raw = yaml.safe_load(path.read_text())
 
