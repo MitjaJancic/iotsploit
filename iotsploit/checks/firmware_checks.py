@@ -140,26 +140,38 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
             continue
 
         uid0_extra = [u for u in users if u["uid"] == "0" and u["username"] != "root"]
-        description = (
-            f"{rel_p}: {len(users)} account(s): " + ", ".join(u["username"] for u in users)
-        )
-        damage = {}
         if uid0_extra:
-            description += (
-                f". WARNING: non-root account(s) with UID 0 (root-equivalent): "
-                f"{', '.join(u['username'] for u in uid0_extra)} - hidden backdoor pattern."
-            )
-            damage = {"privacy": 2, "availability": 1, "chaining_depth": 1}
+            for u in uid0_extra:
+                findings.append(Finding(
+                    finding_id=_fid("firmware_backdoor_uid0", device_id), device_id=device_id,
+                    check_name="firmware_passwd",
+                    description=f"Backdoor account UID 0: {u['username']}:0 [{rel_p}]",
+                    cvss=9.8,
+                    damage={"privacy": 2, "availability": 1, "chaining_depth": 1},
+                ))
+
+        # Check for passwords stored directly in /etc/passwd
+        for u in users:
+            if u["passwd_field"] not in ("x", "*", "!", ""):
+                findings.append(Finding(
+                    finding_id=_fid("firmware_passwd_cred", device_id), device_id=device_id,
+                    check_name="firmware_passwd",
+                    description=f"{u['username']}:{u['passwd_field']} [{rel_p}]",
+                    cvss=7.5,
+                    damage={"privacy": 1, "chaining_depth": 1},
+                ))
 
         evidence_path = None
         if evidence_store:
             evidence_path = evidence_store.save_text(
                 _fid("firmware_passwd", device_id), "passwd_raw", passwd_path.read_text(errors="replace"))
 
+        user_names = [u["username"] for u in users]
+        summary_str = f"{len(users)} accounts in {rel_p}: {', '.join(user_names[:8])}{'...' if len(user_names) > 8 else ''}"
         findings.append(Finding(
             finding_id=_fid("firmware_passwd", device_id), device_id=device_id,
-            check_name="firmware_passwd", description=description, cvss=None,
-            damage=damage, evidence_path=evidence_path,
+            check_name="firmware_passwd", description=summary_str, cvss=None,
+            damage={}, evidence_path=evidence_path,
         ))
 
     # --- /etc/shadow ---
@@ -180,14 +192,11 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
         no_password = [e for e in entries if e["status"] == "no-password"]
         hashed = [e for e in entries if e["status"] == "hashed"]
 
-        if no_password:
+        for e in no_password:
             findings.append(Finding(
                 finding_id=_fid("firmware_shadow_nopw", device_id), device_id=device_id,
                 check_name="firmware_shadow",
-                description=(
-                    f"{rel_s}: account(s) with NO password (empty hash): "
-                    f"{', '.join(e['username'] for e in no_password)} - logs in with any password."
-                ),
+                description=f"{e['username']}:<NO_PASSWORD> [empty password in {rel_s}]",
                 cvss=9.8,
                 damage={"physical_safety": 1, "privacy": 2, "financial": 1, "availability": 1, "chaining_depth": 2},
             ))
@@ -196,10 +205,7 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
             findings.append(Finding(
                 finding_id=_fid("firmware_shadow_hash", device_id), device_id=device_id,
                 check_name="firmware_shadow",
-                description=(
-                    f"{rel_s}: account '{e['username']}' has a {e['hash_type']} hash "
-                    f"(crackable offline with john/hashcat)."
-                ),
+                description=f"{e['username']}:{e['hash_field']} ({e['hash_type']}) [{rel_s}]",
                 cvss=None,
                 damage={"privacy": 1, "chaining_depth": 1},
             ))
@@ -220,7 +226,8 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
         for pattern in _HARDCODED_PATTERNS:
             for match in pattern.finditer(text):
                 line_no = text.count("\n", 0, match.start()) + 1
-                text_hits.append((path, line_no, match.group(0)[:120]))
+                snippet = match.group(0).strip().replace("\n", " ")[:60]
+                text_hits.append((path, line_no, snippet))
 
     if text_hits:
         evidence_path = None
@@ -229,15 +236,12 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
                 _fid("firmware_grep", device_id), "matches",
                 "\n".join(f"{p}:{line}: {snippet}" for p, line, snippet in text_hits),
             )
-        sample = "; ".join(f"{p.relative_to(firmware_root)}:{line}" for p, line, _ in text_hits[:5])
-        more = f" (+{len(text_hits) - 5} more)" if len(text_hits) > 5 else ""
+        sample = "; ".join(f"{snippet} [{p.relative_to(firmware_root)}:{line}]" for p, line, snippet in text_hits[:3])
+        more = f" (+{len(text_hits) - 3} more)" if len(text_hits) > 3 else ""
         findings.append(Finding(
             finding_id=_fid("firmware_grep", device_id), device_id=device_id,
             check_name="firmware_hardcoded_strings",
-            description=(
-                f"{len(text_hits)} credential-shaped string(s) found in scripts/configs - review by "
-                f"hand, this is a broad pattern match with expected false positives: {sample}{more}"
-            ),
+            description=f"{len(text_hits)} hardcoded credential string(s): {sample}{more}",
             cvss=None,
             damage={"privacy": 1, "chaining_depth": 1},
             evidence_path=evidence_path,
@@ -247,7 +251,7 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
         findings.append(Finding(
             finding_id=_fid("firmware_creds", device_id), device_id=device_id,
             check_name="firmware_credentials",
-            description=f"No passwd/shadow files or hardcoded-credential patterns found under {firmware_root}.",
+            description=f"No credentials or shadow files found under {firmware_root}.",
             cvss=None, damage={},
         ))
 

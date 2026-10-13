@@ -138,6 +138,68 @@ class TestFirmwareAudit(unittest.TestCase):
             self.assertIn("Account 'root' has a crackable DES hash", content)
             self.assertIn("CRITICAL", content)
 
+    def test_firmware_credentials_user_hash_format(self):
+        from iotsploit.checks.firmware_checks import check_firmware_credentials
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            etc_dir = tmp_path / "etc"
+            etc_dir.mkdir(parents=True)
+            (etc_dir / "shadow").write_text("root:$1$J17H1VOG$Wgw2F:18145:0:99999:7:::\nadmin::18145:0:99999:7:::\n")
+            (etc_dir / "passwd").write_text("root:x:0:0:root:/root:/bin/sh\nbackdoor:x:0:0::/root:/bin/sh\n")
+
+            findings = check_firmware_credentials(tmp_path)
+            # Should have shadow hash finding in root:$1$... format
+            shadow_hash = next((f for f in findings if "root:$1$" in f.description), None)
+            self.assertIsNotNone(shadow_hash)
+            self.assertIn("MD5 crypt", shadow_hash.description)
+
+            # Should have no-password finding in admin:<NO_PASSWORD> format
+            admin_nopw = next((f for f in findings if "admin:<NO_PASSWORD>" in f.description), None)
+            self.assertIsNotNone(admin_nopw)
+
+            # Should have backdoor UID 0 finding
+            bd_finding = next((f for f in findings if "Backdoor account UID 0" in f.description), None)
+            self.assertIsNotNone(bd_finding)
+
+    def test_clean_column_tables_in_report(self):
+        from iotsploit.core.report import generate_markdown_report
+        from iotsploit.core.scoring import DEFAULT_WEIGHTS
+        findings = [
+            Finding(
+                finding_id="f1",
+                device_id="test_router",
+                check_name="firmware_shadow",
+                description="root:$1$J17H1VOG$Wgw2F (MD5 crypt) [etc/shadow]",
+                cvss=9.8,
+                damage={"privacy": 2},
+            ),
+            Finding(
+                finding_id="f2",
+                device_id="test_router",
+                check_name="firmware_service",
+                description="SSH (Dropbear):22 [etc/config/dropbear] (RootLogin=yes)",
+                cvss=5.3,
+                damage={"availability": 1},
+            ),
+            Finding(
+                finding_id="f3",
+                device_id="test_router",
+                check_name="firmware_secret",
+                description="aws_access_key: AKIA1234567890ABCDEF [system.conf:12]",
+                cvss=7.5,
+                damage={"privacy": 2},
+            ),
+        ]
+        md = generate_markdown_report(findings, DEFAULT_WEIGHTS, "2026-10-13 12:00:00 UTC")
+        # Column tables should exist
+        self.assertIn("## 1. Discovered Credentials & Accounts", md)
+        self.assertIn("`root:$1$J17H1VOG$Wgw2F`", md)
+        self.assertIn("## 2. Discovered Services & Network Daemons", md)
+        self.assertIn("**SSH (Dropbear)**", md)
+        self.assertIn("## 3. Discovered Hardcoded Tokens & API Keys", md)
+        self.assertIn("`aws_access_key`", md)
+        self.assertIn("## 4. Assessment Summary & Findings Index", md)
+
 
 if __name__ == "__main__":
     unittest.main()

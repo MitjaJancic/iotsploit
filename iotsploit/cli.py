@@ -215,15 +215,15 @@ def _print_findings(findings: list[Finding], weights: dict, as_json: bool):
         print("No findings.")
         return
 
-    # Simple index-based column output
-    header = f"{'#':<3} {'CHECK':<26} {'FINDING SUMMARY':<60} {'SCORE':<5}"
+    # Clean index-based columnar output
+    header = f"{'#':<3} {'CHECK':<24} {'FINDING / USER:PASS / SERVICE':<65} {'SCORE':<5}"
     print(header)
     print("-" * len(header))
     for idx, f in enumerate(findings, start=1):
         desc = f.description.strip().replace("\n", " ")
-        if len(desc) > 60:
-            desc = desc[:57] + "…"
-        print(f"{idx:<3} {f.check_name:<26} {desc:<60} {f.damage_score(weights):<5.1f}")
+        if len(desc) > 65:
+            desc = desc[:62] + "…"
+        print(f"{idx:<3} {f.check_name:<24} {desc:<65} {f.damage_score(weights):<5.1f}")
     print("-" * len(header))
     print(f"Total: {len(findings)} finding(s)")
 
@@ -299,10 +299,13 @@ def _run_action(args) -> list[Finding]:
         _require_target(args, "a path to an extracted firmware filesystem")
         device_id = args.device_id or args.target
         target_path = Path(args.target)
-        secret_hits = scan_for_secrets(target_path)
-        service_hits = map_firmware_services(target_path)
 
-        findings = []
+        # 1. Credential audit (/etc/passwd, /etc/shadow, hardcoded strings)
+        cred_findings = check_firmware_credentials(target_path, device_id=device_id, evidence_store=evidence)
+        findings = [f for f in cred_findings if not f.description.startswith("No credentials")]
+
+        # 2. Secret and token scan
+        secret_hits = scan_for_secrets(target_path)
         if secret_hits:
             evidence_path = None
             if evidence:
@@ -311,18 +314,29 @@ def _run_action(args) -> list[Finding]:
                     "secrets_scan",
                     {"hits": secret_hits},
                 )
-            sample = "; ".join(f"{h['file']}:{h['line']} ({h['type']})" for h in secret_hits[:5])
-            more = f" (+{len(secret_hits) - 5} more)" if len(secret_hits) > 5 else ""
-            findings.append(Finding(
-                finding_id=_new_finding_id("firmware_secrets", device_id),
-                device_id=device_id,
-                check_name="firmware_secrets",
-                description=f"Found {len(secret_hits)} hardcoded token/secret pattern(s) in firmware: {sample}{more}",
-                cvss=7.5,
-                damage={"privacy": 2, "chaining_depth": 2},
-                evidence_path=evidence_path,
-            ))
+            for h in secret_hits[:8]:
+                findings.append(Finding(
+                    finding_id=_new_finding_id("firmware_secret", device_id),
+                    device_id=device_id,
+                    check_name="firmware_secret",
+                    description=f"{h['type']}: {h['masked_value']} [{h['file']}:{h['line']}]",
+                    cvss=7.5,
+                    damage={"privacy": 2, "chaining_depth": 1},
+                    evidence_path=evidence_path,
+                ))
+            if len(secret_hits) > 8:
+                findings.append(Finding(
+                    finding_id=_new_finding_id("firmware_secrets_more", device_id),
+                    device_id=device_id,
+                    check_name="firmware_secret",
+                    description=f"+{len(secret_hits) - 8} more hardcoded tokens (see evidence)",
+                    cvss=None,
+                    damage={"privacy": 1},
+                    evidence_path=evidence_path,
+                ))
 
+        # 3. Active service and daemon mapping
+        service_hits = map_firmware_services(target_path)
         if service_hits:
             evidence_path = None
             if evidence:
@@ -331,23 +345,36 @@ def _run_action(args) -> list[Finding]:
                     "service_mapping",
                     {"services": service_hits},
                 )
-            service_summary = ", ".join(s["service"] for s in service_hits[:5])
-            findings.append(Finding(
-                finding_id=_new_finding_id("firmware_services", device_id),
-                device_id=device_id,
-                check_name="firmware_services",
-                description=f"Mapped {len(service_hits)} active service/daemon configuration(s): {service_summary}",
-                cvss=5.3,
-                damage={"availability": 1, "chaining_depth": 1},
-                evidence_path=evidence_path,
-            ))
+            for s in service_hits:
+                svc_name = s.get("service", "Service")
+                cfg = s.get("config_file") or s.get("script") or ""
+                port = s.get("default_port")
+                port_str = f":{port}" if port else ""
+                extra = []
+                if s.get("root_login_allowed"):
+                    extra.append("RootLogin=yes")
+                if s.get("password_auth_enabled"):
+                    extra.append("PasswordAuth=yes")
+                if s.get("masked_value"):
+                    extra.append(f"Key={s['masked_value']}")
+                extra_str = f" ({', '.join(extra)})" if extra else ""
+
+                findings.append(Finding(
+                    finding_id=_new_finding_id("firmware_service", device_id),
+                    device_id=device_id,
+                    check_name="firmware_service",
+                    description=f"{svc_name}{port_str} [{cfg}]{extra_str}",
+                    cvss=5.3,
+                    damage={"availability": 1, "chaining_depth": 1},
+                    evidence_path=evidence_path,
+                ))
 
         if not findings:
             findings.append(Finding(
                 finding_id=_new_finding_id("firmware_audit", device_id),
                 device_id=device_id,
                 check_name="firmware_audit",
-                description=f"No hardcoded tokens, API keys, or known service configurations identified under {args.target}.",
+                description=f"No credentials, tokens, or known services identified under {args.target}.",
                 cvss=None,
                 damage={},
             ))

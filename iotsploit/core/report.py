@@ -9,6 +9,7 @@ for the "usable in the real world" requirement).
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,6 +59,87 @@ def _severity_class(score: float) -> str:
     return "low"
 
 
+def _parse_finding_cred(f: Finding) -> dict | None:
+    if f.check_name in ("firmware_shadow", "firmware_shadow_nopw", "firmware_shadow_hash",
+                        "firmware_passwd", "firmware_passwd_cred", "firmware_backdoor_uid0"):
+        desc = f.description.strip()
+        # Pattern: user:hash (type) [file]
+        m = re.match(r"^([^:\s]+):([^\s\[]+)(?:\s*\(([^)]+)\))?(?:\s*\[([^\]]+)\])?", desc)
+        if m:
+            u, h, t, loc = m.groups()
+            loc_clean = loc.replace("empty password in ", "").strip() if loc else "-"
+            return {
+                "cred": f"{u}:{h}",
+                "type": t or ("Empty password" if "<NO_PASSWORD>" in h else "Password/Hash"),
+                "location": loc_clean,
+            }
+        # Backdoor UID 0
+        m_bd = re.search(r"Backdoor.*:\s*([^:\s]+):(\d+)\s*\[([^\]]+)\]", desc)
+        if m_bd:
+            return {
+                "cred": f"{m_bd.group(1)}:0 (UID 0)",
+                "type": "Hidden Backdoor (UID 0)",
+                "location": m_bd.group(3),
+            }
+        # Passwd account list summary: "15 accounts in etc/passwd: root, daemon..."
+        m_acc = re.match(r"\d+\s*accounts\s*in\s*([^:]+):\s*(.*)", desc)
+        if m_acc:
+            return {
+                "cred": f"Users: {m_acc.group(2).strip()}",
+                "type": "System Accounts (Passwd)",
+                "location": m_acc.group(1).strip(),
+            }
+        # Generic fallback
+        return {
+            "cred": desc.split(" in ")[0],
+            "type": "Credential Finding",
+            "location": desc.split(" in ")[1] if " in " in desc else "-",
+        }
+    return None
+
+
+def _parse_finding_service(f: Finding) -> dict | None:
+    if f.check_name in ("firmware_service", "firmware_services", "firmware_wifi_key"):
+        desc = f.description.strip()
+        m = re.match(r"^([^:\[]+)(?::(\d+))?\s*(?:\[([^\]]*)\])?(?:\s*\(([^)]*)\))?", desc)
+        if m:
+            svc, port, cfg, extra = m.groups()
+            return {
+                "service": svc.strip(),
+                "port": port or "-",
+                "config": cfg or "-",
+                "details": extra or "-",
+            }
+        parts = desc.split("[")
+        return {
+            "service": parts[0].strip(),
+            "port": "-",
+            "config": parts[1].rstrip("]") if len(parts) > 1 else "-",
+            "details": "-",
+        }
+    return None
+
+
+def _parse_finding_secret(f: Finding) -> dict | None:
+    if f.check_name in ("firmware_secret", "firmware_secrets", "firmware_grep", "firmware_hardcoded_strings"):
+        desc = f.description.strip()
+        m = re.match(r"^([^:\s]+):\s*([^\s\[]+)\s*\[([^\]]+)\]", desc)
+        if m:
+            stype, sval, sloc = m.groups()
+            return {
+                "type": stype.strip(),
+                "value": sval.strip(),
+                "location": sloc.strip(),
+            }
+        parts = desc.split("[")
+        return {
+            "type": f.check_name,
+            "value": parts[0].strip() if len(parts) > 1 else desc[:45],
+            "location": parts[1].rstrip("]") if len(parts) > 1 else "-",
+        }
+    return None
+
+
 def generate_markdown_report(findings: list[Finding], weights: dict, generated_at: str) -> str:
     summary = aggregate(findings, weights)
     lines = [
@@ -65,10 +147,92 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
         f"**Generated:** {generated_at}  ",
         f"**Total Findings:** {len(findings)}  ",
         "",
-        "## 1. Device Summary",
+    ]
+
+    # --- 1. Discovered Credentials & Accounts Table ---
+    cred_items = []
+    for f in findings:
+        parsed = _parse_finding_cred(f)
+        if parsed:
+            score = f.damage_score(weights)
+            severity = "CRITICAL" if (f.cvss and f.cvss >= 9.0) or "<NO_PASSWORD>" in parsed["cred"] or "Backdoor" in parsed["type"] else (
+                "HIGH" if score >= 6 else ("MEDIUM" if score >= 3 else "LOW")
+            )
+            cred_items.append((parsed, severity, score))
+
+    if cred_items:
+        lines.extend([
+            "## 1. Discovered Credentials & Accounts",
+            "| # | Account / Credential (`user:password` or `user:hash`) | Status / Type | Source Location | Severity |",
+            "| :---: | :--- | :--- | :--- | :---: |",
+        ])
+        for idx, (c, sev, sc) in enumerate(cred_items, start=1):
+            lines.append(f"| {idx} | `{c['cred']}` | {c['type']} | `{c['location']}` | **{sev}** |")
+        lines.extend(["", "---", ""])
+
+    # --- 2. Discovered Services & Network Daemons Table ---
+    svc_items = []
+    for f in findings:
+        parsed = _parse_finding_service(f)
+        if parsed:
+            svc_items.append(parsed)
+
+    if svc_items:
+        lines.extend([
+            "## 2. Discovered Services & Network Daemons",
+            "| # | Service | Default Port | Config / Script | Access & Security Details |",
+            "| :---: | :--- | :---: | :--- | :--- |",
+        ])
+        for idx, s in enumerate(svc_items, start=1):
+            lines.append(f"| {idx} | **{s['service']}** | `{s['port']}` | `{s['config']}` | {s['details']} |")
+        lines.extend(["", "---", ""])
+
+    # --- 3. Discovered Hardcoded Secrets & Tokens Table ---
+    secret_items = []
+    for f in findings:
+        parsed = _parse_finding_secret(f)
+        if parsed:
+            secret_items.append((parsed, f.damage_score(weights)))
+
+    if secret_items:
+        lines.extend([
+            "## 3. Discovered Hardcoded Tokens & API Keys",
+            "| # | Token Type | Masked Secret / Value | Location | Damage Score |",
+            "| :---: | :--- | :--- | :--- | :---: |",
+        ])
+        for idx, (sec, sc) in enumerate(secret_items, start=1):
+            lines.append(f"| {idx} | `{sec['type']}` | `{sec['value']}` | `{sec['location']}` | {sc:.1f} |")
+        lines.extend(["", "---", ""])
+
+    # --- 4. All Findings Index Table ---
+    lines.extend([
+        "## 4. Assessment Summary & Findings Index",
+        "| # | Check Module | Finding Summary (`user:pass` / Service / Vector) | Damage Score | CVSS | Severity |",
+        "| :---: | :--- | :--- | :---: | :---: | :---: |",
+    ])
+    if not findings:
+        lines.append("| - | *None* | No findings detected | 0.0 | - | INFO |")
+    else:
+        for idx, f in enumerate(findings, start=1):
+            short_desc = f.description.strip().replace("\n", " ")
+            if len(short_desc) > 85:
+                short_desc = short_desc[:82] + "…"
+            cvss_str = str(f.cvss) if f.cvss is not None else "-"
+            score = f.damage_score(weights)
+            severity = "CRITICAL" if (f.cvss and f.cvss >= 9.0) else (
+                "HIGH" if score >= 6 else ("MEDIUM" if score >= 3 else "LOW")
+            )
+            lines.append(f"| {idx} | `{f.check_name}` | {short_desc} | {score:.1f} | {cvss_str} | **{severity}** |")
+
+    # --- 5. Device Summary ---
+    lines.extend([
+        "",
+        "---",
+        "",
+        "## 5. Device Summary",
         "| Device ID | Findings Count | Total Damage Score | Max Damage Score | Max CVSS |",
         "| :--- | :---: | :---: | :---: | :---: |",
-    ]
+    ])
     if summary:
         for dev, s in summary.items():
             lines.append(
@@ -77,30 +241,12 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
     else:
         lines.append("| *None* | 0 | 0.0 | 0.0 | 0.0 |")
 
+    # --- 6. Detailed Findings ---
     lines.extend([
         "",
         "---",
         "",
-        "## 2. Findings Index",
-        "| # | Check | Summary | Damage Score | CVSS |",
-        "| :---: | :--- | :--- | :---: | :---: |",
-    ])
-
-    if not findings:
-        lines.append("| - | *None* | No findings detected | 0.0 | - |")
-    else:
-        for idx, f in enumerate(findings, start=1):
-            short_desc = f.description.strip().replace("\n", " ")
-            if len(short_desc) > 75:
-                short_desc = short_desc[:72] + "…"
-            cvss_str = str(f.cvss) if f.cvss is not None else "-"
-            lines.append(f"| {idx} | `{f.check_name}` | {short_desc} | {f.damage_score(weights):.1f} | {cvss_str} |")
-
-    lines.extend([
-        "",
-        "---",
-        "",
-        "## 3. Detailed Findings",
+        "## 6. Detailed Technical Findings & Evidence",
         "",
     ])
 
@@ -116,8 +262,7 @@ def generate_markdown_report(findings: list[Finding], weights: dict, generated_a
             lines.extend([
                 f"### {i}. [{severity}] `{f.check_name}` (Device: `{f.device_id}`)",
                 f"- **Finding ID:** `{f.finding_id}`",
-                f"- **CVSS Base Score:** {f.cvss if f.cvss is not None else 'N/A'}",
-                f"- **Calculated Damage Score:** {score:.1f}",
+                f"- **CVSS Base Score:** {f.cvss if f.cvss is not None else 'N/A'} | **Calculated Damage Score:** {score:.1f}",
             ])
 
             if f.damage:
