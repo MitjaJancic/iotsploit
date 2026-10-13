@@ -56,8 +56,28 @@ _HARDCODED_PATTERNS = [
 ]
 
 # Files/dirs that are expensive or pointless to text-scan.
-_SKIP_SUFFIXES = {".jpg", ".png", ".gif", ".ico", ".woff", ".woff2", ".ttf", ".squashfs", ".bin"}
-_SKIP_DIR_NAMES = {".git", "node_modules"}
+_SKIP_SUFFIXES = {
+    ".jpg", ".jpeg", ".png", ".gif", ".ico", ".svg", ".bmp",
+    ".woff", ".woff2", ".ttf", ".eot",
+    ".squashfs", ".bin", ".rom", ".img", ".iso",
+    ".so", ".o", ".a", ".ko", ".ipk", ".deb",
+    ".gz", ".tar", ".tgz", ".zip", ".xz", ".bz2",
+}
+_SKIP_DIR_NAMES = {
+    ".git", "node_modules", "bin", "sbin", "lib", "lib64",
+    "dev", "proc", "sys",
+}
+
+
+def _is_binary_file(path: Path) -> bool:
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(1024)
+            if chunk.startswith(b"\x7fELF") or b"\x00" in chunk:
+                return True
+    except (OSError, PermissionError):
+        return True
+    return False
 
 
 def _fid(check_name: str, device_id: str) -> str:
@@ -66,11 +86,21 @@ def _fid(check_name: str, device_id: str) -> str:
 
 def _parse_passwd(passwd_path: Path) -> list[dict]:
     users = []
-    for line in passwd_path.read_text(errors="replace").splitlines():
+    try:
+        text = passwd_path.read_text(errors="replace")
+    except Exception:
+        return []
+    for line in text.splitlines():
+        line = line.strip()
         if not line or line.startswith("#"):
             continue
         fields = line.split(":")
-        if len(fields) < 7:
+        # A valid UNIX passwd line has exactly 7 fields, with numeric UID and GID
+        if len(fields) != 7:
+            continue
+        if not fields[2].isdigit() or not fields[3].isdigit():
+            continue
+        if not re.match(r"^[a-zA-Z0-9_.-]+$", fields[0]):
             continue
         users.append({
             "username": fields[0],
@@ -83,22 +113,46 @@ def _parse_passwd(passwd_path: Path) -> list[dict]:
 
 def _parse_shadow(shadow_path: Path) -> list[dict]:
     entries = []
-    for line in shadow_path.read_text(errors="replace").splitlines():
+    try:
+        text = shadow_path.read_text(errors="replace")
+    except Exception:
+        return []
+    for line in text.splitlines():
+        line = line.strip()
         if not line or line.startswith("#"):
             continue
         fields = line.split(":")
         if len(fields) < 2:
             continue
-        username, hash_field = fields[0], fields[1]
-        if hash_field in ("", "!", "!!", "*"):
+        username, hash_field = fields[0].strip(), fields[1].strip()
+        if not re.match(r"^[a-zA-Z0-9_.-]+$", username):
+            continue
+
+        # In Linux/BusyBox shadow files:
+        # "" means empty password (logs in without password)
+        # "*", "!", "!!", "x", or anything starting with "!" means account is locked/disabled
+        if hash_field in ("", "!", "!!", "*", "x") or hash_field.startswith("!"):
             status = "no-password" if hash_field == "" else "locked"
             hash_type = None
         else:
             hash_type = next((name for prefix, name in _HASH_PREFIXES.items()
-                               if hash_field.startswith(prefix)), "unrecognized/legacy DES crypt")
-            status = "hashed"
-        entries.append({"username": username, "status": status, "hash_type": hash_type,
-                         "hash_field": hash_field})
+                               if hash_field.startswith(prefix)), None)
+            if not hash_type:
+                # Check for legacy 13-char DES crypt
+                if len(hash_field) == 13 and re.match(r"^[a-zA-Z0-9./]{13}$", hash_field):
+                    hash_type = "legacy DES crypt"
+                else:
+                    status = "locked"
+                    hash_type = None
+
+            status = "hashed" if hash_type else "locked"
+
+        entries.append({
+            "username": username,
+            "status": status,
+            "hash_type": hash_type,
+            "hash_field": hash_field,
+        })
     return entries
 
 
@@ -125,8 +179,14 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
         )]
 
     # --- /etc/passwd ---
-    passwd_matches = list(firmware_root.rglob("passwd")) + list(firmware_root.rglob("etc/passwd"))
-    passwd_files = [p for p in set(passwd_matches) if p.is_file()]
+    passwd_candidates = list(firmware_root.rglob("passwd"))
+    passwd_files = [
+        p for p in set(passwd_candidates)
+        if p.is_file()
+        and "etc" in p.parts
+        and not any(d in p.parts for d in ("bin", "sbin", "lib", "lib64"))
+        and not _is_binary_file(p)
+    ]
     for passwd_path in passwd_files:
         rel_p = passwd_path.relative_to(firmware_root)
         try:
@@ -137,6 +197,9 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
                 check_name="firmware_passwd", description=f"Could not parse {rel_p}: {exc}",
                 cvss=None, damage={},
             ))
+            continue
+
+        if not users:
             continue
 
         uid0_extra = [u for u in users if u["uid"] == "0" and u["username"] != "root"]
@@ -175,8 +238,14 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
         ))
 
     # --- /etc/shadow ---
-    shadow_matches = list(firmware_root.rglob("shadow")) + list(firmware_root.rglob("etc/shadow"))
-    shadow_files = [p for p in set(shadow_matches) if p.is_file()]
+    shadow_candidates = list(firmware_root.rglob("shadow"))
+    shadow_files = [
+        p for p in set(shadow_candidates)
+        if p.is_file()
+        and "etc" in p.parts
+        and not any(d in p.parts for d in ("bin", "sbin", "lib", "lib64"))
+        and not _is_binary_file(p)
+    ]
     for shadow_path in shadow_files:
         rel_s = shadow_path.relative_to(firmware_root)
         try:
@@ -206,8 +275,8 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
                 finding_id=_fid("firmware_shadow_hash", device_id), device_id=device_id,
                 check_name="firmware_shadow",
                 description=f"{e['username']}:{e['hash_field']} ({e['hash_type']}) [{rel_s}]",
-                cvss=None,
-                damage={"privacy": 1, "chaining_depth": 1},
+                cvss=7.5,
+                damage={"privacy": 2, "chaining_depth": 1},
             ))
 
     # --- grep for hardcoded credential-shaped strings ---
@@ -216,6 +285,8 @@ def check_firmware_credentials(firmware_root: str | Path, device_id: str | None 
         if not path.is_file() or path.suffix.lower() in _SKIP_SUFFIXES:
             continue
         if any(part in _SKIP_DIR_NAMES for part in path.parts):
+            continue
+        if _is_binary_file(path):
             continue
         try:
             if path.stat().st_size > max_grep_file_size:
