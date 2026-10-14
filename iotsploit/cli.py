@@ -66,6 +66,10 @@ from iotsploit.checks.firmware_audit import scan_for_secrets, map_firmware_servi
 from iotsploit.checks.coap_checks import check_coap_auth
 from iotsploit.checks.shelly_checks import check_shelly_endpoints, check_shelly_open_ap
 from iotsploit.checks.mqtt_classifier import classify_mqtt_broker
+from iotsploit.checks.web_audit import audit_web_security
+from iotsploit.checks.firmware_elf import audit_firmware_binaries
+from iotsploit.checks.firmware_sbom import audit_firmware_sbom
+from iotsploit.checks.chain_verifier import verify_attack_chain
 
 # module -> {action: one-line help}, purely for --help / listing.
 # The actual behaviour for each lives in _run_action() below.
@@ -73,6 +77,7 @@ MODULES = {
     "http": {
         "check": "Probe state-changing HTTP endpoints for missing authentication. (needs authorization)",
         "injection-check": "Time-based blind command-injection probe of injectable_params. (needs authorization)",
+        "audit": "Audit security headers (CSP, X-Frame-Options), cookie flags, and clickjacking.",
     },
     "mqtt": {
         "test": "Check whether a broker expected to use TLS still accepts plaintext.",
@@ -84,6 +89,9 @@ MODULES = {
         "check": "Audit Shelly Gen 1 / Gen 2 endpoints for missing authentication.",
         "verify": "Safely actuate physical test relay/solenoid via auto-reverting momentary 1-second pulse.",
         "ap-check": "Audit for Gen 4 persistent unencrypted Setup Access Point flaw (default: 192.168.33.1).",
+    },
+    "chain": {
+        "verify": "Verify multi-stage attack chaining and credential reuse across SSH, LuCI, MQTT, and backdoors.",
     },
     "upnp": {
         "enum": "SSDP-discover UPnP devices and fingerprint via description XML (ch.4 + ch.6).",
@@ -100,14 +108,16 @@ MODULES = {
     },
     "firmware": {
         "scan": "Static credential scan of an already-extracted firmware filesystem (ch.9).",
-        "audit": "Static scan for API keys, tokens, and high-entropy strings.",
+        "audit": "Static scan for active services and daemon configurations.",
+        "checksec": "Analyze ELF binary mitigations (NX, Canaries, PIE, RELRO) across firmware binaries.",
+        "sbom": "Extract OpenWrt package inventory from opkg status and correlate known CVEs.",
     },
     "ble": {
         "scan": "Passive BLE advertisement scan matching the profile's name pattern.",
         "access-check": "Audit GATT characteristic write permissions for missing encryption/auth.",
     },
     "ports": {
-        "scan": "Connect-scan the profile's flagged_ports list.",
+        "scan": "Connect-scan the profile's flagged_ports list and grab service banners.",
     },
     "cve": {
         "list": "Surface known_cves entries from the profile(s).",
@@ -144,11 +154,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "Required for http/mqtt/ports/modbus/audit/firmware; not used by ble/cve/profiles/wsd.")
 
     profile_group = p.add_argument_group("profile selection")
-    profile_group.add_argument("--profiles-dir", "--profiles_dir", default="profiles",
+    profile_group.add_argument("--profiles-dir", default="profiles",
                                 help="Directory of device profile YAML files (default: ./profiles)")
     profile_group.add_argument("--profile", default=None,
                                 help="Path to a single profile file. Overrides --device-id/--profiles-dir.")
-    profile_group.add_argument("--device-id", "--device_id", default=None,
+    profile_group.add_argument("--device-id", default=None,
                                 help="device_id to look up in --profiles-dir, e.g. owasp_iotgoat. "
                                      "If omitted, the action runs against every profile in --profiles-dir "
                                      "that supports the relevant capability. For profile-independent modules "
@@ -179,16 +189,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "to streamline rapid testing and iteration without editing profile YAMLs.",
     )
     opts.add_argument(
-        "--scope-config", "--scope_config", default=None,
+        "--scope-config", default=None,
         help="Path to lab scope YAML policy file (default: lab_context.yaml if present).",
     )
     opts.add_argument(
-        "--no-scope-check", "--no_scope_check", action="store_true",
+        "--no-scope-check", action="store_true",
         help="Disable lab network scope validation boundaries.",
     )
     opts.add_argument(
         "--verify", action="store_true",
         help="Safely perform non-destructive active verification (timed auto-reverting 1s pulse) on actuator targets.",
+    )
+    opts.add_argument(
+        "--firmware", default=None,
+        help="Path to an extracted firmware directory (used for attack chain pivot verification).",
+    )
+    opts.add_argument(
+        "--creds", default=None,
+        help="Candidate credentials to test for attack chain pivoting in 'user:pass' format.",
     )
     opts.add_argument("--json", action="store_true", help="Print findings as JSON instead of a table.")
     opts.add_argument("-v", "--verbose", action="store_true", help="Print profile load / skip notes to stderr.")
@@ -405,6 +423,50 @@ def _run_action(args) -> list[Finding]:
                     damage={},
                 ))
             return findings
+
+        if args.module == "chain" and args.action == "verify":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "chain verify")
+            creds_list = []
+            if getattr(args, "creds", None):
+                parts = args.creds.split(":", 1)
+                u = parts[0]
+                p = parts[1] if len(parts) > 1 else ""
+                creds_list.append((u, p))
+            return verify_attack_chain(
+                target=args.target,
+                firmware_dir=getattr(args, "firmware", None),
+                credentials=creds_list,
+                device_id=args.device_id,
+                evidence_store=evidence,
+            )
+
+        if args.module == "http" and args.action == "audit":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "http audit")
+            return audit_web_security(
+                target=args.target,
+                port=args.port or 80,
+                path=args.location or "/",
+                device_id=args.device_id,
+                evidence_store=evidence,
+            )
+
+        if args.module == "firmware" and args.action == "checksec":
+            _require_target(args, "a path to an extracted firmware filesystem")
+            return audit_firmware_binaries(
+                args.target,
+                device_id=args.device_id,
+                evidence_store=evidence,
+            )
+
+        if args.module == "firmware" and args.action == "sbom":
+            _require_target(args, "a path to an extracted firmware filesystem")
+            return audit_firmware_sbom(
+                args.target,
+                device_id=args.device_id,
+                evidence_store=evidence,
+            )
 
         # --- profile-driven modules below ---
         profiles = _resolve_profiles(args)

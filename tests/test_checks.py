@@ -281,5 +281,97 @@ class TestDescriptiveScoring(unittest.TestCase):
         self.assertEqual(levels["privacy"], "Device Fingerprint / Metadata Leak")
 
 
+class TestWebAudit(unittest.TestCase):
+
+    def test_web_security_headers_and_clickjacking(self):
+        from iotsploit.checks.web_audit import audit_web_security
+        with MockHTTPServer(host="127.0.0.1", port=8888):
+            findings = audit_web_security("127.0.0.1", port=8888, path="/status")
+            self.assertGreaterEqual(len(findings), 3)
+
+            # Check that missing X-Frame-Options and CSP are flagged
+            clickjack = next((f for f in findings if f.check_name == "missing_clickjacking_protection"), None)
+            self.assertIsNotNone(clickjack)
+            self.assertIn("anti-framing", clickjack.description)
+
+            # Check that cleartext HTTP is flagged
+            cleartext = next((f for f in findings if f.check_name == "cleartext_web_transport"), None)
+            self.assertIsNotNone(cleartext)
+
+
+class TestFirmwareChecksec(unittest.TestCase):
+
+    def test_inspect_elf_synthetic_binary(self):
+        from iotsploit.checks.firmware_elf import inspect_elf, audit_firmware_binaries
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            bin_dir = tmp_path / "bin"
+            bin_dir.mkdir(parents=True)
+            dummy_elf = bin_dir / "busybox"
+
+            # Create minimal valid 32-bit ELF header (52 bytes)
+            # EI_MAG (4), EI_CLASS (1=32bit), EI_DATA (1=LE), EI_VERSION (1), EI_OSABI (0), PAD (8)
+            e_ident = b"\x7fELF\x01\x01\x01\x00" + b"\x00" * 8
+            # e_type=2 (ET_EXEC), e_machine=3 (x86), e_version=1, e_entry=0x8048000, e_phoff=52, e_shoff=0, e_flags=0, e_ehsize=52, e_phentsize=32, e_phnum=1, e_shentsize=0, e_shnum=0, e_shstrndx=0
+            import struct
+            header = e_ident + struct.pack("<HHIIIIIHHHHHH", 2, 3, 1, 0x8048000, 52, 0, 0, 52, 32, 1, 0, 0, 0)
+            # Program header: PT_LOAD (1), offset 0, vaddr 0x8048000, paddr 0x8048000, filesz 84, memsz 84, flags 5 (R|X), align 0x1000
+            ph = struct.pack("<IIIIIIII", 1, 0, 0x8048000, 0x8048000, 84, 84, 5, 0x1000)
+            dummy_elf.write_bytes(header + ph)
+
+            info = inspect_elf(dummy_elf)
+            self.assertIsNotNone(info)
+            self.assertEqual(info["class"], "32-bit")
+            self.assertFalse(info["pie"])  # ET_EXEC is not PIE
+            self.assertFalse(info["canary"])
+
+            findings = audit_firmware_binaries(tmp_path)
+            self.assertGreaterEqual(len(findings), 2)
+            summary = next(f for f in findings if f.check_name == "firmware_checksec_summary")
+            self.assertIn("Analyzed 1 firmware ELF binaries", summary.description)
+
+
+class TestFirmwareSbom(unittest.TestCase):
+
+    def test_audit_firmware_sbom_opkg_cve(self):
+        from iotsploit.checks.firmware_sbom import audit_firmware_sbom
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            opkg_dir = tmp_path / "usr" / "lib" / "opkg"
+            opkg_dir.mkdir(parents=True)
+            status_file = opkg_dir / "status"
+            status_file.write_text(
+                "Package: dnsmasq\nVersion: 2.80-1\nStatus: install user installed\nArchitecture: x86\n\n"
+                "Package: dropbear\nVersion: 2019.78-1\nStatus: install user installed\nArchitecture: x86\n\n"
+                "Package: miniupnpd\nVersion: 2.1.20190415-1\nStatus: install user installed\nArchitecture: x86\n"
+            )
+
+            findings = audit_firmware_sbom(tmp_path)
+            self.assertGreaterEqual(len(findings), 3)
+
+            # Check inventory finding
+            inv = next(f for f in findings if f.check_name == "firmware_sbom_inventory")
+            self.assertIn("Identified 3 installed OpenWrt packages", inv.description)
+
+            # Check dnsmasq CVE-2020-7982 finding
+            dns_vuln = next(f for f in findings if f.check_name == "firmware_vulnerable_component" and "dnsmasq" in f.description)
+            self.assertIn("CVE-2020-7982", dns_vuln.description)
+
+            # Check miniupnpd overflow finding
+            upnp_vuln = next(f for f in findings if f.check_name == "firmware_vulnerable_component" and "miniupnpd" in f.description)
+            self.assertIn("CVE-2019-12108", upnp_vuln.description)
+
+
+class TestChainVerifier(unittest.TestCase):
+
+    def test_verify_attack_chain_mock(self):
+        from iotsploit.checks.chain_verifier import verify_attack_chain
+        # Test against loopback without active services
+        findings = verify_attack_chain("127.0.0.1")
+        self.assertGreaterEqual(len(findings), 1)
+        chain_find = next(f for f in findings if f.check_name == "multi_vector_attack_chain")
+        self.assertIn("Attack Chaining Depth", chain_find.description)
+
+
 if __name__ == "__main__":
     unittest.main()

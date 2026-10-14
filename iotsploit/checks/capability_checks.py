@@ -239,29 +239,49 @@ def check_flagged_ports(profile: DeviceProfile, ip: str, evidence_store=None) ->
         return findings
 
     ports = [fp.port for fp in profile.flagged_ports]
-    results = {r.port: r for r in scan_host(ip, ports=ports)}
+    results = {r.port: r for r in scan_host(ip, ports=ports, grab_banner=True)}
 
     for fp in profile.flagged_ports:
         result = results.get(fp.port)
         is_open = bool(result and result.open)
+        banner = result.banner if result else None
 
         evidence_path = None
         if evidence_store:
             evidence_path = evidence_store.save_text(
                 _new_finding_id("flagged_port", profile.device_id),
                 "result",
-                f"ip={ip} port={fp.port} open={is_open} reason={fp.reason}",
+                f"ip={ip} port={fp.port} open={is_open} banner={banner}\nreason={fp.reason}",
             )
 
+        # Check if banner exhibits interactive backdoor/root shell traits
+        is_confirmed_backdoor = False
+        banner_tag = ""
+        if banner:
+            banner_tag = f" [Banner: '{banner}']"
+            lower_banner = banner.lower()
+            if any(term in lower_banner for term in ["backdoor", "root@", "busybox", "#", "sh-"]):
+                is_confirmed_backdoor = True
+
+        damage = dict(fp.damage) if is_open else {}
+        cvss = None
+        if is_open:
+            if is_confirmed_backdoor:
+                cvss = 9.8
+                damage["chaining_depth"] = max(damage.get("chaining_depth", 0), 3)
+                damage["privacy"] = max(damage.get("privacy", 0), 3)
+                damage["availability"] = max(damage.get("availability", 0), 2)
+            elif fp.damage:
+                cvss = 7.5
+
+        status_text = "OPEN" if is_open else "closed"
         findings.append(Finding(
             finding_id=_new_finding_id(f"port_{fp.port}", profile.device_id),
             device_id=profile.device_id,
             check_name="flagged_port",
-            description=(
-                f"Port {fp.port} is {'OPEN' if is_open else 'closed'} - {fp.reason}"
-            ),
-            cvss=None,
-            damage=fp.damage if is_open else {},
+            description=f"Port {fp.port} is {status_text}{banner_tag} - {fp.reason.strip()}",
+            cvss=cvss,
+            damage=damage,
             evidence_path=evidence_path,
         ))
     return findings
