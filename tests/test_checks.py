@@ -206,5 +206,80 @@ class TestFirmwareAudit(unittest.TestCase):
         self.assertIn("## 4. Assessment Summary & Findings Index", md)
 
 
+class TestLabScopeContext(unittest.TestCase):
+
+    def test_in_scope_default_cidrs(self):
+        from iotsploit.core.scope import LabContext
+        ctx = LabContext()
+        self.assertTrue(ctx.is_in_scope("127.0.0.1"))
+        self.assertTrue(ctx.is_in_scope("192.168.42.129"))
+        self.assertTrue(ctx.is_in_scope("192.168.33.1"))
+        self.assertTrue(ctx.is_in_scope("10.0.0.5"))
+
+    def test_out_of_scope_rejection(self):
+        from iotsploit.core.scope import LabContext, ScopeViolationError
+        ctx = LabContext()
+        self.assertFalse(ctx.is_in_scope("8.8.8.8"))
+        with self.assertRaises(ScopeViolationError):
+            ctx.assert_in_scope("8.8.8.8", "active_verification_probe")
+
+    def test_enforce_scope_toggle(self):
+        from iotsploit.core.scope import LabContext
+        ctx = LabContext(enforce_scope=False)
+        self.assertTrue(ctx.is_in_scope("8.8.8.8"))
+
+
+class TestMqttTopicClassifier(unittest.TestCase):
+
+    def test_topic_classification_tiers(self):
+        from iotsploit.checks.mqtt_classifier import classify_topics
+        topics = [
+            "shellies/shelly1-1234/relay/0/command",
+            "zigbee2mqtt/door_lock/set",
+            "tele/living_room/sensor/motion",
+            "sensor/temperature/state",
+            "homeassistant/status",
+            "zigbee2mqtt/bridge/config",
+            "custom/unregistered/data",
+        ]
+        classified = classify_topics(topics)
+        self.assertEqual(len(classified["actuator"]), 2)
+        self.assertEqual(len(classified["telemetry"]), 2)
+        self.assertEqual(len(classified["bridge_admin"]), 2)
+        self.assertEqual(len(classified["uncategorized"]), 1)
+
+
+class TestShellyChecks(unittest.TestCase):
+
+    def test_shelly_detection_and_safe_verification(self):
+        from iotsploit.checks.shelly_checks import check_shelly_endpoints
+        with MockHTTPServer(host="127.0.0.1", port=8888):
+            findings = check_shelly_endpoints("127.0.0.1", port=8888, allow_active_verification=True)
+            self.assertEqual(len(findings), 2)
+            auth_finding = next(f for f in findings if f.check_name == "shelly_auth_bypass")
+            self.assertIn("exposes HTTP management WITHOUT authentication", auth_finding.description)
+
+            act_finding = next(f for f in findings if f.check_name == "shelly_active_verification")
+            self.assertIn("Active Verification Confirmed", act_finding.description)
+            self.assertIn("auto-reverting", act_finding.description)
+
+
+class TestDescriptiveScoring(unittest.TestCase):
+
+    def test_descriptive_impact_levels(self):
+        finding = Finding(
+            finding_id="f_chain",
+            device_id="shelly_lock",
+            check_name="shelly_active_verification",
+            description="Verified pulse actuation",
+            cvss=9.1,
+            damage={"chaining_depth": 3, "physical_safety": 3, "privacy": 1},
+        )
+        self.assertEqual(finding.chaining_description(), "Full Perimeter to Physical Breach")
+        levels = finding.impact_levels()
+        self.assertEqual(levels["physical_safety"], "Physical Perimeter Breach (Door/Lock/Gate Actuated)")
+        self.assertEqual(levels["privacy"], "Device Fingerprint / Metadata Leak")
+
+
 if __name__ == "__main__":
     unittest.main()

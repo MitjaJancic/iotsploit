@@ -7,4 +7,5 @@ venv/
 .venv/
 evidence/
 reports/
+report.*
 *.pcap

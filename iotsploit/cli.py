@@ -40,6 +40,7 @@ import sys
 from iotsploit.core.device_profile import load_profiles_dir, load_profile, DeviceProfile
 from iotsploit.core.evidence import EvidenceStore
 from iotsploit.core.scoring import load_weights, Finding
+from iotsploit.core.scope import LabContext, ScopeViolationError
 from iotsploit.core.report import write_reports
 from iotsploit.checks.capability_checks import (
     check_http_auth,
@@ -63,6 +64,8 @@ from iotsploit.checks.book_checks import (
 from iotsploit.checks.firmware_checks import check_firmware_credentials
 from iotsploit.checks.firmware_audit import scan_for_secrets, map_firmware_services
 from iotsploit.checks.coap_checks import check_coap_auth
+from iotsploit.checks.shelly_checks import check_shelly_endpoints, check_shelly_open_ap
+from iotsploit.checks.mqtt_classifier import classify_mqtt_broker
 
 # module -> {action: one-line help}, purely for --help / listing.
 # The actual behaviour for each lives in _run_action() below.
@@ -75,6 +78,12 @@ MODULES = {
         "test": "Check whether a broker expected to use TLS still accepts plaintext.",
         "anon-check": "Attempt a full anonymous CONNECT against a broker (Practical IoT Hacking, ch.4).",
         "auth-check": "Test MQTT anonymous access and profile-declared credentials (CONNECT-only).",
+        "classify": "Sample topic namespaces (#) and classify actuator, telemetry, and bridge-admin risks.",
+    },
+    "shelly": {
+        "check": "Audit Shelly Gen 1 / Gen 2 endpoints for missing authentication.",
+        "verify": "Safely actuate physical test relay/solenoid via auto-reverting momentary 1-second pulse.",
+        "ap-check": "Audit for Gen 4 persistent unencrypted Setup Access Point flaw (default: 192.168.33.1).",
     },
     "upnp": {
         "enum": "SSDP-discover UPnP devices and fingerprint via description XML (ch.4 + ch.6).",
@@ -169,6 +178,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Development/lab mode: automatically treats all targets as authorized for this run "
              "to streamline rapid testing and iteration without editing profile YAMLs.",
     )
+    opts.add_argument(
+        "--scope-config", default=None,
+        help="Path to lab scope YAML policy file (default: lab_context.yaml if present).",
+    )
+    opts.add_argument(
+        "--no-scope-check", action="store_true",
+        help="Disable lab network scope validation boundaries.",
+    )
+    opts.add_argument(
+        "--verify", action="store_true",
+        help="Safely perform non-destructive active verification (timed auto-reverting 1s pulse) on actuator targets.",
+    )
     opts.add_argument("--json", action="store_true", help="Print findings as JSON instead of a table.")
     opts.add_argument("-v", "--verbose", action="store_true", help="Print profile load / skip notes to stderr.")
 
@@ -188,10 +209,11 @@ def _resolve_profiles(args) -> list[DeviceProfile]:
     return all_profiles
 
 
-def _is_authorized(args, profile: DeviceProfile) -> bool:
+def _is_authorized(args, profile: DeviceProfile | None = None) -> bool:
     """A profile's own authorized: true satisfies the gate permanently;
-    --authorized or --dev satisfies it for this run (streamlining lab development)."""
-    return getattr(args, "dev", False) or args.authorized or profile.authorized
+    --authorized, --verify or --dev satisfies it for this run (streamlining lab development)."""
+    prof_auth = profile.authorized if (profile is not None) else False
+    return getattr(args, "dev", False) or getattr(args, "verify", False) or getattr(args, "authorized", False) or prof_auth
 
 
 def _note(args, msg: str):
@@ -237,239 +259,295 @@ def _require_target(args, what: str = "a target IP/hostname"):
 def _run_action(args) -> list[Finding]:
     evidence = EvidenceStore(args.evidence)
     findings: list[Finding] = []
+    scope = LabContext.load(getattr(args, "scope_config", None))
+    if getattr(args, "no_scope_check", False):
+        scope.enforce_scope = False
 
-    # --- profiles module: informational, no findings ---
-    if args.module == "profiles":
-        all_profiles = load_profiles_dir(args.profiles_dir)
-        if args.action == "list":
-            for p in all_profiles:
-                auth_tag = " [authorized]" if p.authorized else ""
-                print(f"{p.device_id:<20} {p.vendor:<12} {p.model:<20} "
-                      f"protocols={','.join(p.protocols)}{auth_tag}")
-            return []
-        if args.action == "show":
-            device_id = args.device_id or args.target
-            if not device_id:
-                print("Usage: iotsploit profiles show <device_id>", file=sys.stderr)
-                sys.exit(1)
-            matched = [p for p in all_profiles if p.device_id == device_id]
-            if not matched:
-                print(f"No profile with device_id '{device_id}'", file=sys.stderr)
-                sys.exit(1)
-            print(json.dumps(matched[0].raw, indent=2))
-            return []
+    try:
+        # --- profiles module: informational, no findings ---
+        if args.module == "profiles":
+            all_profiles = load_profiles_dir(args.profiles_dir)
+            if args.action == "list":
+                for p in all_profiles:
+                    auth_tag = " [authorized]" if p.authorized else ""
+                    print(f"{p.device_id:<20} {p.vendor:<12} {p.model:<20} "
+                          f"protocols={','.join(p.protocols)}{auth_tag}")
+                return []
+            if args.action == "show":
+                device_id = args.device_id or args.target
+                if not device_id:
+                    print("Usage: iotsploit profiles show <device_id>", file=sys.stderr)
+                    sys.exit(1)
+                matched = [p for p in all_profiles if p.device_id == device_id]
+                if not matched:
+                    print(f"No profile with device_id '{device_id}'", file=sys.stderr)
+                    sys.exit(1)
+                print(json.dumps(matched[0].raw, indent=2))
+                return []
 
-    # --- profile-independent modules: no DeviceProfile required ---
-    # (--device-id here, if given, is used only to label findings - it is
-    # never looked up against --profiles-dir, so these work with zero
-    # profiles configured.)
-    if args.module == "mqtt" and args.action == "anon-check":
-        _require_target(args)
-        device_id = args.device_id or args.target
-        return check_mqtt_anonymous(args.target, args.port or 1883, device_id=device_id,
-                                     evidence_store=evidence)
-
-    if args.module == "upnp" and args.action == "enum":
-        device_id = args.device_id or args.target
-        return upnp_enum(target_location=args.location, device_id=device_id, evidence_store=evidence)
-
-    if args.module == "upnp" and args.action == "wan-check":
-        if not args.location:
-            print("'upnp wan-check' needs --location (the device description URL).", file=sys.stderr)
-            sys.exit(1)
-        device_id = args.device_id or args.target or args.location
-        return upnp_wan_exposure(args.location, device_id=device_id, evidence_store=evidence)
-
-    if args.module == "wsd" and args.action == "scan":
-        return wsd_scan()
-
-    if args.module == "modbus" and args.action == "check":
-        _require_target(args)
-        device_id = args.device_id or args.target
-        return check_modbus_unauth_read(args.target, port=args.port or 502, unit_id=args.unit,
-                                         device_id=device_id, evidence_store=evidence)
-
-    if args.module == "firmware" and args.action == "scan":
-        _require_target(args, "a path to an extracted firmware filesystem")
-        device_id = args.device_id or args.target
-        return check_firmware_credentials(args.target, device_id=device_id, evidence_store=evidence)
-
-    if args.module == "firmware" and args.action == "audit":
-        from pathlib import Path
-        _require_target(args, "a path to an extracted firmware filesystem")
-        device_id = args.device_id or args.target
-        target_path = Path(args.target)
-
-        # Firmware audit: ONLY for active service and daemon configurations
-        service_hits = map_firmware_services(target_path)
-        findings = []
-        if service_hits:
-            evidence_path = None
-            if evidence:
-                evidence_path = evidence.save_json(
-                    _new_finding_id("firmware_services", device_id),
-                    "service_mapping",
-                    {"services": service_hits},
-                )
-            for s in service_hits:
-                svc_name = s.get("service", "Service")
-                cfg = s.get("config_file") or s.get("script") or ""
-                port = s.get("default_port")
-                port_str = f":{port}" if port else ""
-                extra = []
-                if s.get("root_login_allowed"):
-                    extra.append("RootLogin=yes")
-                if s.get("password_auth_enabled"):
-                    extra.append("PasswordAuth=yes")
-                if s.get("masked_value"):
-                    extra.append(f"Key={s['masked_value']}")
-                extra_str = f" ({', '.join(extra)})" if extra else ""
-
-                findings.append(Finding(
-                    finding_id=_new_finding_id("firmware_service", device_id),
-                    device_id=device_id,
-                    check_name="firmware_service",
-                    description=f"{svc_name}{port_str} [{cfg}]{extra_str}",
-                    cvss=5.3,
-                    damage={"availability": 1, "chaining_depth": 1},
-                    evidence_path=evidence_path,
-                ))
-
-        if not findings:
-            findings.append(Finding(
-                finding_id=_new_finding_id("firmware_audit", device_id),
-                device_id=device_id,
-                check_name="firmware_audit",
-                description=f"No active service or daemon configurations identified under {args.target}.",
-                cvss=None,
-                damage={},
-            ))
-        return findings
-
-    # --- profile-driven modules below ---
-    profiles = _resolve_profiles(args)
-
-    if args.module == "http" and args.action == "check":
-        _require_target(args)
-        for p in profiles:
-            if not p.supports("http"):
-                _note(args, f"{p.device_id} does not declare http, skipping")
-                continue
-            if not _is_authorized(args, p):
-                _note(args, f"{p.device_id} not authorized (pass --authorized or set authorized: true "
-                            f"in its profile) - state-changing request will be skipped")
-            findings += check_http_auth(p, args.target, allow_state_changes=_is_authorized(args, p),
-                                         evidence_store=evidence)
-        return findings
-
-    if args.module == "http" and args.action == "injection-check":
-        _require_target(args)
-        for p in profiles:
-            if not p.supports("http"):
-                _note(args, f"{p.device_id} does not declare http, skipping")
-                continue
-            if not any(e.injectable_params for e in p.http_endpoints):
-                _note(args, f"{p.device_id} has no endpoints with injectable_params set, skipping")
-                continue
-            if not _is_authorized(args, p):
-                _note(args, f"{p.device_id} not authorized - injection probes will be skipped")
-            findings += check_http_injection(p, args.target, allow_state_changes=_is_authorized(args, p),
-                                              evidence_store=evidence)
-        return findings
-
-    if args.module == "coap" and args.action == "check":
-        _require_target(args)
-        for p in profiles:
-            if not p.coap_endpoints:
-                _note(args, f"{p.device_id} has no coap endpoints declared, skipping")
-                continue
-            try:
-                findings += check_coap_auth_enforcement(
-                    p, args.target, allow_state_changes=_is_authorized(args, p), evidence_store=evidence
-                )
-            except Exception:
-                findings += check_coap_auth(p, args.target, port=args.port or 5683, evidence_store=evidence)
-        return findings
-
-    if args.module == "mqtt" and args.action == "test":
-        _require_target(args)
-        for p in profiles:
-            if not p.supports("mqtt"):
-                _note(args, f"{p.device_id} does not declare mqtt, skipping")
-                continue
-            findings += check_mqtt_tls(p, args.target, args.port or 1883, evidence_store=evidence)
-        return findings
-
-    if args.module == "mqtt" and args.action == "auth-check":
-        _require_target(args)
-        for p in profiles:
-            if not p.supports("mqtt"):
-                _note(args, f"{p.device_id} does not declare mqtt, skipping")
-                continue
-            findings += check_mqtt_auth_enforcement(p, args.target, args.port or 1883, evidence_store=evidence)
-        return findings
-
-    if args.module == "ble" and args.action == "scan":
-        ble_profiles = [p for p in profiles if p.supports("ble")]
-        if not ble_profiles:
-            _note(args, "no profile in scope declares ble")
-        return asyncio.run(_run_ble(ble_profiles, evidence))
-
-    if args.module == "ble" and args.action == "access-check":
-        ble_profiles = [p for p in profiles if p.supports("ble")]
-        if not ble_profiles:
-            _note(args, "no profile in scope declares ble")
-        for p in ble_profiles:
-            findings += check_ble_access_control(
-                p, allow_state_changes=_is_authorized(args, p), evidence_store=evidence
+        # --- shelly module: independent auditor & active verification ---
+        if args.module == "shelly" and args.action in ("check", "verify"):
+            _require_target(args)
+            scope.assert_in_scope(args.target, f"shelly {args.action}")
+            allow_verify = (args.action == "verify") or _is_authorized(args, None)
+            return check_shelly_endpoints(
+                args.target,
+                port=args.port or 80,
+                allow_active_verification=allow_verify,
+                device_id=args.device_id,
+                evidence_store=evidence,
             )
-        return findings
 
-    if args.module == "ports" and args.action == "scan":
-        _require_target(args)
-        for p in profiles:
-            if not p.flagged_ports:
-                _note(args, f"{p.device_id} has no flagged_ports, skipping")
-                continue
-            findings += check_flagged_ports(p, args.target, evidence_store=evidence)
-        return findings
+        if args.module == "shelly" and args.action == "ap-check":
+            target = args.target or "192.168.33.1"
+            scope.assert_in_scope(target, "shelly ap-check")
+            return check_shelly_open_ap(
+                target=target,
+                device_id=args.device_id,
+                evidence_store=evidence,
+            )
 
-    if args.module == "cve" and args.action == "list":
-        for p in profiles:
-            findings += check_known_cves(p)
-        return findings
+        # --- profile-independent modules: no DeviceProfile required ---
+        # (--device-id here, if given, is used only to label findings - it is
+        # never looked up against --profiles-dir, so these work with zero
+        # profiles configured.)
+        if args.module == "mqtt" and args.action == "classify":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "mqtt classify")
+            return classify_mqtt_broker(
+                args.target,
+                port=args.port or 1883,
+                device_id=args.device_id,
+                evidence_store=evidence,
+            )
 
-    if args.module == "audit" and args.action == "run":
-        _require_target(args)
-        for p in profiles:
-            findings += check_known_cves(p)
-            if p.supports("http"):
+        if args.module == "mqtt" and args.action == "anon-check":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "mqtt anon-check")
+            device_id = args.device_id or args.target
+            return check_mqtt_anonymous(args.target, args.port or 1883, device_id=device_id,
+                                         evidence_store=evidence)
+
+        if args.module == "upnp" and args.action == "enum":
+            device_id = args.device_id or args.target
+            return upnp_enum(target_location=args.location, device_id=device_id, evidence_store=evidence)
+
+        if args.module == "upnp" and args.action == "wan-check":
+            if not args.location:
+                print("'upnp wan-check' needs --location (the device description URL).", file=sys.stderr)
+                sys.exit(1)
+            device_id = args.device_id or args.target or args.location
+            return upnp_wan_exposure(args.location, device_id=device_id, evidence_store=evidence)
+
+        if args.module == "wsd" and args.action == "scan":
+            return wsd_scan()
+
+        if args.module == "modbus" and args.action == "check":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "modbus check")
+            device_id = args.device_id or args.target
+            return check_modbus_unauth_read(args.target, port=args.port or 502, unit_id=args.unit,
+                                             device_id=device_id, evidence_store=evidence)
+
+        if args.module == "firmware" and args.action == "scan":
+            _require_target(args, "a path to an extracted firmware filesystem")
+            device_id = args.device_id or args.target
+            return check_firmware_credentials(args.target, device_id=device_id, evidence_store=evidence)
+
+        if args.module == "firmware" and args.action == "audit":
+            from pathlib import Path
+            _require_target(args, "a path to an extracted firmware filesystem")
+            device_id = args.device_id or args.target
+            target_path = Path(args.target)
+
+            # Firmware audit: ONLY for active service and daemon configurations
+            service_hits = map_firmware_services(target_path)
+            findings = []
+            if service_hits:
+                evidence_path = None
+                if evidence:
+                    evidence_path = evidence.save_json(
+                        _new_finding_id("firmware_services", device_id),
+                        "service_mapping",
+                        {"services": service_hits},
+                    )
+                for s in service_hits:
+                    svc_name = s.get("service", "Service")
+                    cfg = s.get("config_file") or s.get("script") or ""
+                    port = s.get("default_port")
+                    port_str = f":{port}" if port else ""
+                    extra = []
+                    if s.get("root_login_allowed"):
+                        extra.append("RootLogin=yes")
+                    if s.get("password_auth_enabled"):
+                        extra.append("PasswordAuth=yes")
+                    if s.get("masked_value"):
+                        extra.append(f"Key={s['masked_value']}")
+                    extra_str = f" ({', '.join(extra)})" if extra else ""
+
+                    findings.append(Finding(
+                        finding_id=_new_finding_id("firmware_service", device_id),
+                        device_id=device_id,
+                        check_name="firmware_service",
+                        description=f"{svc_name}{port_str} [{cfg}]{extra_str}",
+                        cvss=5.3,
+                        damage={"availability": 1, "chaining_depth": 1},
+                        evidence_path=evidence_path,
+                    ))
+
+            if not findings:
+                findings.append(Finding(
+                    finding_id=_new_finding_id("firmware_audit", device_id),
+                    device_id=device_id,
+                    check_name="firmware_audit",
+                    description=f"No active service or daemon configurations identified under {args.target}.",
+                    cvss=None,
+                    damage={},
+                ))
+            return findings
+
+        # --- profile-driven modules below ---
+        profiles = _resolve_profiles(args)
+
+        if args.module == "http" and args.action == "check":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "http check")
+            for p in profiles:
+                if not p.supports("http"):
+                    _note(args, f"{p.device_id} does not declare http, skipping")
+                    continue
                 if not _is_authorized(args, p):
-                    _note(args, f"{p.device_id} not authorized - http check will skip its state-changing request")
+                    _note(args, f"{p.device_id} not authorized (pass --authorized, --verify or set authorized: true "
+                                f"in its profile) - state-changing request will be skipped")
                 findings += check_http_auth(p, args.target, allow_state_changes=_is_authorized(args, p),
                                              evidence_store=evidence)
-                if any(e.injectable_params for e in p.http_endpoints):
-                    findings += check_http_injection(p, args.target, allow_state_changes=_is_authorized(args, p),
-                                                      evidence_store=evidence)
-            if p.supports("mqtt"):
-                findings += check_mqtt_tls(p, args.target, args.port or 1883, evidence_store=evidence)
-                findings += check_mqtt_anonymous(args.target, args.port or 1883, device_id=p.device_id,
+            return findings
+
+        if args.module == "http" and args.action == "injection-check":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "http injection-check")
+            for p in profiles:
+                if not p.supports("http"):
+                    _note(args, f"{p.device_id} does not declare http, skipping")
+                    continue
+                if not any(e.injectable_params for e in p.http_endpoints):
+                    _note(args, f"{p.device_id} has no endpoints with injectable_params set, skipping")
+                    continue
+                if not _is_authorized(args, p):
+                    _note(args, f"{p.device_id} not authorized - injection probes will be skipped")
+                findings += check_http_injection(p, args.target, allow_state_changes=_is_authorized(args, p),
                                                   evidence_store=evidence)
+            return findings
+
+        if args.module == "coap" and args.action == "check":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "coap check")
+            for p in profiles:
+                if not p.coap_endpoints:
+                    _note(args, f"{p.device_id} has no coap endpoints declared, skipping")
+                    continue
+                try:
+                    findings += check_coap_auth_enforcement(
+                        p, args.target, allow_state_changes=_is_authorized(args, p), evidence_store=evidence
+                    )
+                except Exception:
+                    findings += check_coap_auth(p, args.target, port=args.port or 5683, evidence_store=evidence)
+            return findings
+
+        if args.module == "mqtt" and args.action == "test":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "mqtt test")
+            for p in profiles:
+                if not p.supports("mqtt"):
+                    _note(args, f"{p.device_id} does not declare mqtt, skipping")
+                    continue
+                findings += check_mqtt_tls(p, args.target, args.port or 1883, evidence_store=evidence)
+            return findings
+
+        if args.module == "mqtt" and args.action == "auth-check":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "mqtt auth-check")
+            for p in profiles:
+                if not p.supports("mqtt"):
+                    _note(args, f"{p.device_id} does not declare mqtt, skipping")
+                    continue
                 findings += check_mqtt_auth_enforcement(p, args.target, args.port or 1883, evidence_store=evidence)
-            if p.coap_endpoints:
-                findings += check_coap_auth_enforcement(p, args.target, allow_state_changes=_is_authorized(args, p),
-                                                         evidence_store=evidence)
-            if p.flagged_ports:
-                findings += check_flagged_ports(p, args.target, evidence_store=evidence)
-        ble_profiles = [p for p in profiles if p.supports("ble")]
-        if ble_profiles:
-            findings += asyncio.run(_run_ble(ble_profiles, evidence))
+            return findings
+
+        if args.module == "ble" and args.action == "scan":
+            ble_profiles = [p for p in profiles if p.supports("ble")]
+            if not ble_profiles:
+                _note(args, "no profile in scope declares ble")
+            return asyncio.run(_run_ble(ble_profiles, evidence))
+
+        if args.module == "ble" and args.action == "access-check":
+            ble_profiles = [p for p in profiles if p.supports("ble")]
+            if not ble_profiles:
+                _note(args, "no profile in scope declares ble")
             for p in ble_profiles:
-                findings += check_ble_access_control(p, allow_state_changes=_is_authorized(args, p),
-                                                     evidence_store=evidence)
+                findings += check_ble_access_control(
+                    p, allow_state_changes=_is_authorized(args, p), evidence_store=evidence
+                )
+            return findings
+
+        if args.module == "ports" and args.action == "scan":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "ports scan")
+            for p in profiles:
+                if not p.flagged_ports:
+                    _note(args, f"{p.device_id} has no flagged_ports, skipping")
+                    continue
+                findings += check_flagged_ports(p, args.target, evidence_store=evidence)
+            return findings
+
+        if args.module == "cve" and args.action == "list":
+            for p in profiles:
+                findings += check_known_cves(p)
+            return findings
+
+        if args.module == "audit" and args.action == "run":
+            _require_target(args)
+            scope.assert_in_scope(args.target, "audit run")
+            for p in profiles:
+                findings += check_known_cves(p)
+                if p.supports("http"):
+                    if not _is_authorized(args, p):
+                        _note(args, f"{p.device_id} not authorized - http check will skip its state-changing request")
+                    findings += check_http_auth(p, args.target, allow_state_changes=_is_authorized(args, p),
+                                                 evidence_store=evidence)
+                    if any(e.injectable_params for e in p.http_endpoints):
+                        findings += check_http_injection(p, args.target, allow_state_changes=_is_authorized(args, p),
+                                                          evidence_store=evidence)
+                if p.supports("mqtt"):
+                    findings += check_mqtt_tls(p, args.target, args.port or 1883, evidence_store=evidence)
+                    findings += check_mqtt_anonymous(args.target, args.port or 1883, device_id=p.device_id,
+                                                      evidence_store=evidence)
+                    findings += check_mqtt_auth_enforcement(p, args.target, args.port or 1883, evidence_store=evidence)
+                if p.coap_endpoints:
+                    findings += check_coap_auth_enforcement(p, args.target, allow_state_changes=_is_authorized(args, p),
+                                                             evidence_store=evidence)
+                if p.flagged_ports:
+                    findings += check_flagged_ports(p, args.target, evidence_store=evidence)
+            ble_profiles = [p for p in profiles if p.supports("ble")]
+            if ble_profiles:
+                findings += asyncio.run(_run_ble(ble_profiles, evidence))
+                for p in ble_profiles:
+                    findings += check_ble_access_control(p, allow_state_changes=_is_authorized(args, p),
+                                                         evidence_store=evidence)
+            return findings
+
         return findings
 
-    return findings
+    except ScopeViolationError as exc:
+        print(f"\n[!] Scope Boundary Rejection: {exc}\n", file=sys.stderr)
+        return [Finding(
+            finding_id=_new_finding_id("scope_violation", getattr(args, "device_id", None) or getattr(args, "target", None) or "target"),
+            device_id=getattr(args, "device_id", None) or getattr(args, "target", None) or "target",
+            check_name="scope_violation",
+            description=str(exc),
+            cvss=None,
+            damage={},
+        )]
 
 
 def main():

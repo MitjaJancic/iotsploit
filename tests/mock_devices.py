@@ -17,11 +17,21 @@ class MockDeviceHTTPHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         # Simulate open endpoint (e.g. missing auth)
-        if "/relay/0" in self.path:
+        if "/status" in self.path:
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(b'{"ison": true, "has_timer": false}')
+            self.wfile.write(b'{"relays": [{"ison": false, "has_timer": false}], "mac": "AABBCCDDEEFF"}')
+        elif "/settings" in self.path and "/secure" not in self.path:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"login": {"enabled": false}, "device": {"type": "SHSW-1"}}')
+        elif "/relay/0" in self.path:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ison": true, "has_timer": true}')
         elif "/secure/settings" in self.path:
             # Requires auth (401)
             self.send_response(401)

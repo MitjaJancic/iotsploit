@@ -41,7 +41,43 @@ import struct
 import uuid
 import xml.etree.ElementTree as ET
 
-import requests
+try:
+    import requests
+except ImportError:
+    class _UrllibRequestsFallback:
+        @staticmethod
+        def get(url, timeout=4):
+            import urllib.request
+            req = urllib.request.Request(url, headers={"User-Agent": "iotsploit/1.0"})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                text = resp.read().decode("utf-8", errors="replace")
+                class _Resp:
+                    def __init__(self, t):
+                        self.text = t
+                        self.status_code = 200
+                return _Resp(text)
+
+        @staticmethod
+        def post(url, data=None, headers=None, timeout=4):
+            import urllib.request
+            data_bytes = data.encode("utf-8") if isinstance(data, str) else (data or b"")
+            req = urllib.request.Request(url, data=data_bytes, headers=headers or {}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    text = resp.read().decode("utf-8", errors="replace")
+                    class _Resp:
+                        def __init__(self, t, s):
+                            self.text = t
+                            self.status_code = s
+                    return _Resp(text, resp.status)
+            except urllib.error.HTTPError as exc:
+                class _Resp:
+                    def __init__(self, s):
+                        self.text = ""
+                        self.status_code = s
+                return _Resp(exc.code)
+
+    requests = _UrllibRequestsFallback()
 
 from iotsploit.core.scoring import Finding
 

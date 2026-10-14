@@ -18,6 +18,39 @@ from pathlib import Path
 
 DIMENSIONS = ["physical_safety", "privacy", "financial", "availability", "chaining_depth"]
 
+DIMENSION_DESCRIPTIONS = {
+    "chaining_depth": {
+        0: "Isolated (Single Endpoint)",
+        1: "Local Subnet (Adjacent Pivot)",
+        2: "Multi-Service Pivot (Hub/Broker Compromise)",
+        3: "Full Perimeter to Physical Breach",
+    },
+    "physical_safety": {
+        0: "None (Digital Only)",
+        1: "Environmental Nuisance / State Tampering",
+        2: "Equipment Hazard / Actuator Control",
+        3: "Physical Perimeter Breach (Door/Lock/Gate Actuated)",
+    },
+    "privacy": {
+        0: "None",
+        1: "Device Fingerprint / Metadata Leak",
+        2: "Continuous Telemetry / Sensor Exposure",
+        3: "Surveillance Feed / Identity Exfiltration",
+    },
+    "financial": {
+        0: "Negligible",
+        1: "Minor / Single Billing Anomaly",
+        2: "High Consumption / Meter Fraud",
+        3: "Direct Financial Extraction / Fraud",
+    },
+    "availability": {
+        0: "Normal Operation",
+        1: "Transient Degradation",
+        2: "Service Denial / Daemon Crash",
+        3: "Permanent Device Lockout / Bricked",
+    },
+}
+
 DEFAULT_WEIGHTS = {
     "physical_safety": 1.0,
     "privacy": 1.0,
@@ -41,9 +74,25 @@ class Finding:
         w = weights or DEFAULT_WEIGHTS
         return sum(self.damage.get(dim, 0) * w.get(dim, 1.0) for dim in DIMENSIONS)
 
+    def impact_levels(self) -> dict[str, str]:
+        """Returns human-readable descriptive impact progression labels for each scored dimension."""
+        levels = {}
+        for dim in DIMENSIONS:
+            val = int(self.damage.get(dim, 0))
+            clamped = min(max(val, 0), 3)
+            levels[dim] = DIMENSION_DESCRIPTIONS.get(dim, {}).get(clamped, str(val))
+        return levels
+
+    def chaining_description(self) -> str:
+        depth = int(self.damage.get("chaining_depth", 0))
+        clamped = min(max(depth, 0), 3)
+        return DIMENSION_DESCRIPTIONS["chaining_depth"].get(clamped, "Isolated")
+
     def to_dict(self, weights: dict | None = None) -> dict:
         d = asdict(self)
         d["damage_score"] = self.damage_score(weights)
+        d["impact_levels"] = self.impact_levels()
+        d["chaining_level"] = self.chaining_description()
         return d
 
 

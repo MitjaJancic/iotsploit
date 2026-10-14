@@ -356,11 +356,26 @@ def generate_text_report(findings: list[Finding], weights: dict, generated_at: s
             lines.append(f"{idx:<3} {sec['type']:<22} {sec['value']:<26} {sec['location']:<20} {sc:.1f}")
         lines.extend(["-" * 80, ""])
 
-    # --- 4. Summary Table ---
+    # --- 4. Attack Chaining & Descriptive Impact ---
+    chain_items = [f for f in findings if f.damage.get("chaining_depth") or f.damage.get("physical_safety") or f.damage.get("privacy")]
+    if chain_items:
+        lines.extend([
+            "[ATTACK CHAINING & DESCRIPTIVE IMPACT]",
+            f"{'#':<3} {'CHECK':<22} {'CHAINING PROGRESSION':<32} {'PHYSICAL / SAFETY IMPACT'}",
+            "-" * 96,
+        ])
+        for idx, f in enumerate(chain_items, start=1):
+            imp = f.impact_levels()
+            chain_desc = imp.get("chaining_depth", "Isolated")
+            safety_desc = imp.get("physical_safety", "None")
+            lines.append(f"{idx:<3} {f.check_name:<22} {chain_desc:<32} {safety_desc}")
+        lines.extend(["-" * 96, ""])
+
+    # --- 5. Summary Table ---
     lines.extend([
         "[FINDINGS SUMMARY]",
         f"{'#':<3} {'CHECK':<22} {'SUMMARY':<46} {'SCORE':<6} {'CVSS':<6} {'SEVERITY'}",
-        "-" * 92,
+        "-" * 96,
     ])
     for idx, f in enumerate(findings, start=1):
         s_desc = f.description.strip().replace("\n", " ")
@@ -372,7 +387,7 @@ def generate_text_report(findings: list[Finding], weights: dict, generated_at: s
             "HIGH" if score >= 6 else ("MEDIUM" if score >= 3 else "LOW")
         )
         lines.append(f"{idx:<3} {f.check_name:<22} {s_desc:<46} {score:<6.1f} {cvss_str:<6} {severity}")
-    lines.extend(["-" * 92, ""])
+    lines.extend(["-" * 96, ""])
 
     return "\n".join(lines) + "\n"
 
