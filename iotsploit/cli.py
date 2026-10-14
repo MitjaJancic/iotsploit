@@ -144,11 +144,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          "Required for http/mqtt/ports/modbus/audit/firmware; not used by ble/cve/profiles/wsd.")
 
     profile_group = p.add_argument_group("profile selection")
-    profile_group.add_argument("--profiles-dir", default="profiles",
+    profile_group.add_argument("--profiles-dir", "--profiles_dir", default="profiles",
                                 help="Directory of device profile YAML files (default: ./profiles)")
     profile_group.add_argument("--profile", default=None,
                                 help="Path to a single profile file. Overrides --device-id/--profiles-dir.")
-    profile_group.add_argument("--device-id", default=None,
+    profile_group.add_argument("--device-id", "--device_id", default=None,
                                 help="device_id to look up in --profiles-dir, e.g. owasp_iotgoat. "
                                      "If omitted, the action runs against every profile in --profiles-dir "
                                      "that supports the relevant capability. For profile-independent modules "
@@ -179,11 +179,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
              "to streamline rapid testing and iteration without editing profile YAMLs.",
     )
     opts.add_argument(
-        "--scope-config", default=None,
+        "--scope-config", "--scope_config", default=None,
         help="Path to lab scope YAML policy file (default: lab_context.yaml if present).",
     )
     opts.add_argument(
-        "--no-scope-check", action="store_true",
+        "--no-scope-check", "--no_scope_check", action="store_true",
         help="Disable lab network scope validation boundaries.",
     )
     opts.add_argument(
